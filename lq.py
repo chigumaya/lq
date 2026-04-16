@@ -101,7 +101,7 @@ def load_config(args: argparse.Namespace) -> Config:
     if not isinstance(defaults, dict):
         error(f"Invalid config file '{config_path}': 'defaults' must be a JSON object")
     
-    # Model selection: CLI argument > Default in config > Env var
+    # Model selection for named config entries
     selected_name = args.model or defaults.get("model_name")
     
     # Lookup model entry if name is provided
@@ -115,7 +115,10 @@ def load_config(args: argparse.Namespace) -> Config:
     # Resolve core parameters
     api_url = os.getenv("API_URL") or model_entry.get("api_url")
     api_key = os.getenv("API_KEY") or model_entry.get("api_key") or ""
-    model = os.getenv("MODEL") or model_entry.get("model") or selected_name
+    if args.model:
+        model = model_entry.get("model") or args.model
+    else:
+        model = os.getenv("MODEL") or model_entry.get("model") or selected_name
 
     # Validation
     if not api_url:
@@ -268,10 +271,6 @@ def _sniff_image_mime_type(path: str) -> Optional[str]:
         return mime_type
 
     return extension_mime_types.get(ext)
-
-def is_image_file(path: str) -> bool:
-    """Detect if file is an image using magic bytes and extension."""
-    return _sniff_image_mime_type(path) is not None
 
 def _get_image_mime_type_from_bytes(header: bytes) -> Optional[str]:
     """Detect an image MIME type from leading bytes."""
