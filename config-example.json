@@ -1,0 +1,19 @@
+{
+  "defaults": {
+    "model_name": "foo"
+  },
+  "models": [
+    {
+      "name": "foo",
+      "model": "foo-model",
+      "api_url": "https://example.com/v1",
+      "api_key": "sk-..."
+    },
+    {
+      "name": "bar",
+      "model": "bar-model",
+      "api_url": "https://example.net/v1",
+      "api_key": "sk-..."
+    }
+  ]
+}
