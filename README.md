@@ -17,10 +17,11 @@ lq [OPTIONS] <prompt>
 ```
 -f, --file <filename>              Adds a file to the prompt (can be specified multiple times)
 -i, --image <filename>             Adds an image to the prompt (can be specified multiple times)
--s, --system <text>                Specifies the system prompt as a string
--S, --system-file <filename>       Reads the system prompt from a file
+-s, --system <text>                Specifies the additional system prompt as a string
+-S, --system-file <filename>       Reads the additional system prompt from a file
 -c, --config <path>                Path to the configuration file (Default: ~/.config/lq/config.json)
 -m, --model <name>                 Specifies the model to use
+-M, --max-size <size>              Maximum input size (Default: 10MB)
 -j, --json                         Outputs raw JSON response
 --debug                            Debug mode (outputs request information to stderr)
 -h, --help                         Displays help
@@ -38,7 +39,8 @@ Configured in `~/.config/lq/config.json`. A different path can be specified usin
 ```json
 {
   "defaults": {
-    "model_name": "foo"
+    "model_name": "foo",
+    "max_size": "10MB"
   },
   "models": [
     {
@@ -96,7 +98,7 @@ In descending order of priority:
 % diff file-A file-B | lq 'summarize the differences'
 
 # Analyze logs
-% tail -100 /var/log/messages | lq 'diagnose problems from these logs'
+% tail /var/log/messages | lq 'diagnose problems from these logs'
 
 # Translate text
 % man curl | lq 'translate to Japanese'
@@ -137,8 +139,6 @@ Note that it does not support text encodings other than UTF-8.
 Currently, the LLM must treat data specified as part of the prompt, even if it is intended not to be treated as such. Therefore, `lq` instructs the default system prompt to ignore any instructions contained within files or standard input provided via `-f` or `-i`.
 
 However, since different LLMs interpret instructions differently, and defense can potentially be bypassed by cleverly crafted payloads, complete countermeasures are difficult. While efforts have been made to reduce the risk of unintended command execution or role-playing attacks, this is merely a risk mitigation measure and should not be considered a guarantee.
-
-Furthermore, the system prompt can be overwritten using the `-s` or `-S` options. Be aware that when this happens, this risk mitigation measure will no longer function. Changing the system prompt should only be done if absolutely necessary.
 
 ### Information Leakage
 
