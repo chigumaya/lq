@@ -243,49 +243,11 @@ def file_to_base64(path: str) -> str:
     data = read_file_binary(path)
     return base64.b64encode(data).decode("ascii")
 
-def is_image_file(path: str) -> bool:
-    """Detect if file is an image using magic bytes and extension."""
-    image_extensions = {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg'}
+def _sniff_image_mime_type(path: str) -> Optional[str]:
+    """Detect an image MIME type from file content or extension."""
     _, ext = os.path.splitext(path.lower())
-    
-    # Check by extension first
-    if ext in image_extensions:
-        return True
-    
-    # Check by magic bytes (file signature)
-    try:
-        with open(path, 'rb') as f:
-            header = f.read(12)
-            
-            # PNG: \x89PNG\r\n\x1a\n
-            if header.startswith(b'\x89PNG'):
-                return True
-            
-            # JPEG: \xff\xd8\xff
-            if header.startswith(b'\xff\xd8\xff'):
-                return True
-            
-            # GIF: GIF87a or GIF89a
-            if header.startswith(b'GIF87a') or header.startswith(b'GIF89a'):
-                return True
-            
-            # WebP: RIFF....WEBP
-            if header.startswith(b'RIFF') and b'WEBP' in header:
-                return True
-            
-            # BMP: BM
-            if header.startswith(b'BM'):
-                return True
-    except Exception:
-        pass
-    
-    return False
 
-def get_image_mime_type(path: str) -> str:
-    """Get MIME type for image file."""
-    _, ext = os.path.splitext(path.lower())
-    
-    mime_types = {
+    extension_mime_types = {
         '.png': 'image/png',
         '.jpg': 'image/jpeg',
         '.jpeg': 'image/jpeg',
@@ -294,8 +256,48 @@ def get_image_mime_type(path: str) -> str:
         '.bmp': 'image/bmp',
         '.svg': 'image/svg+xml',
     }
-    
-    return mime_types.get(ext, 'image/png')  # default to PNG if unknown
+
+    try:
+        with open(path, 'rb') as f:
+            header = f.read(512)
+    except Exception:
+        return extension_mime_types.get(ext)
+
+    mime_type = _get_image_mime_type_from_bytes(header)
+    if mime_type:
+        return mime_type
+
+    return extension_mime_types.get(ext)
+
+def is_image_file(path: str) -> bool:
+    """Detect if file is an image using magic bytes and extension."""
+    return _sniff_image_mime_type(path) is not None
+
+def _get_image_mime_type_from_bytes(header: bytes) -> Optional[str]:
+    """Detect an image MIME type from leading bytes."""
+    if header.startswith(b'\x89PNG\r\n\x1a\n'):
+        return 'image/png'
+    if header.startswith(b'\xff\xd8\xff'):
+        return 'image/jpeg'
+    if header.startswith(b'GIF87a') or header.startswith(b'GIF89a'):
+        return 'image/gif'
+    if header.startswith(b'RIFF') and len(header) >= 12 and header[8:12] == b'WEBP':
+        return 'image/webp'
+    if header.startswith(b'BM'):
+        return 'image/bmp'
+    return None
+
+def get_image_mime_type(path: str) -> str:
+    """Get MIME type for an image file.
+
+    Prefers content sniffing so extensionless paths such as process
+    substitution (`/dev/fd/*`) still get the correct MIME type.
+    """
+    mime_type = _sniff_image_mime_type(path)
+    if mime_type:
+        return mime_type
+
+    error(f"Unable to determine MIME type for image '{path}'")
 
 def assemble_prompt(cfg: Config) -> List[Dict[str, Any]]:
     """Build content array with proper structure for injection mitigation.
