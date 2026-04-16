@@ -28,8 +28,6 @@ lq [OPTIONS] <prompt>
 -v, --version                      Displays version
 ```
 
-Note that if the LLM does not support image input, the image specified with `-i` will likely be ignored.
-
 ## Configuration
 
 ### Configuration File
