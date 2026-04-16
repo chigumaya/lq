@@ -1,6 +1,7 @@
 {
   "defaults": {
-    "model_name": "foo"
+    "model_name": "foo",
+    "max_size": "10MB"
   },
   "models": [
     {
