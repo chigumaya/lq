@@ -23,8 +23,60 @@ class Config:
     files: List[str]
     images: List[str]
     prompt: List[str]
+    max_size: int  # Maximum size for file/stdin reads in bytes
     output_json: bool = False
     debug: bool = False
+
+def parse_size(size_str: str) -> int:
+    """Parse a size string with optional units (B, KB, MB, GB) to bytes.
+    
+    Args:
+        size_str: Size string (e.g., '1024', '5MB', '10kb')
+        
+    Returns:
+        Size in bytes
+        
+    Raises:
+        ValueError: If the size string is invalid
+    """
+    size_str = size_str.strip()
+    if not size_str:
+        raise ValueError("Size string is empty")
+    
+    # Define unit multipliers (case-insensitive)
+    units = {
+        'B': 1,
+        'KB': 1024,
+        'MB': 1024 * 1024,
+        'GB': 1024 * 1024 * 1024,
+    }
+    
+    # Extract the numeric part and unit part
+    import re
+    match = re.match(r'^(\d*\.?\d+)\s*([KMGT]?B)?$', size_str, re.IGNORECASE)
+    if not match:
+        raise ValueError(f"Invalid size format: {size_str}")
+    
+    number_str, unit_str = match.groups()
+    try:
+        number = float(number_str)
+    except ValueError:
+        raise ValueError(f"Invalid number in size string: {size_str}")
+    
+    if number < 0:
+        raise ValueError("Size cannot be negative")
+    
+    # Default to bytes if no unit specified
+    if not unit_str:
+        return int(number)
+    
+    # Convert unit to uppercase for lookup
+    unit_upper = unit_str.upper()
+    multiplier = units.get(unit_upper)
+    if multiplier is None:
+        raise ValueError(f"Unknown unit: {unit_str}")
+        
+    return int(number * multiplier)
 
 def error(msg: str, exit_code: int = 1) -> None:
     """Print an error message to stderr and exit."""
@@ -73,6 +125,17 @@ def load_config(args: argparse.Namespace) -> Config:
     if args.prompt is None:  # Handle case where no prompt is provided
         args.prompt = []
 
+    # Resolve max_size: CLI argument > Config file > Default (10MB)
+    DEFAULT_MAX_SIZE = 10 * 1024 * 1024  # 10MB
+    max_size_str = args.max_size or defaults.get("max_size")
+    if max_size_str is not None:
+        try:
+            max_size = parse_size(str(max_size_str))
+        except ValueError as e:
+            error(f"Invalid max_size value '{max_size_str}': {e}")
+    else:
+        max_size = DEFAULT_MAX_SIZE
+
     # Default system prompt (leveraging role separation for security)
     system_prompt = (
         "You are an AI assistant designed to process structured input from a CLI tool.\n\n"
@@ -111,6 +174,7 @@ def load_config(args: argparse.Namespace) -> Config:
         files=args.files or [],
         images=args.images or [],
         prompt=args.prompt or [],
+        max_size=max_size,
         output_json=args.output_json,
         debug=args.debug
     )
@@ -137,6 +201,8 @@ def parse_args() -> argparse.Namespace:
                         help="Path to JSON config file (default: ~/.config/lq/config.json)")
     parser.add_argument("-m", "--model", dest="model", metavar="NAME",
                         help="Select model (overrides defaults.model_name in config file)")
+    parser.add_argument("-M", "--max-size", dest="max_size", metavar="SIZE",
+                        help="Maximum size for file/stdin reads (e.g. 5MB, 1024KB)")
     parser.add_argument("-j", "--json", action="store_true", dest="output_json",
                         help="Output raw JSON response instead of extracting content")
     parser.add_argument("--debug", action="store_true", default=False, dest="debug",
@@ -236,8 +302,8 @@ def assemble_prompt(cfg: Config) -> List[Dict[str, Any]]:
     """
     content: List[Dict[str, Any]] = []
     
-    # Max size for reading (10MB)
-    MAX_SIZE = 10 * 1024 * 1024
+    # Max size for reading
+    MAX_SIZE = cfg.max_size
     
     # Place user prompt FIRST
     if cfg.prompt:
@@ -251,7 +317,7 @@ def assemble_prompt(cfg: Config) -> List[Dict[str, Any]]:
     for fpath in cfg.files:
         filename = os.path.basename(fpath)
         if os.path.getsize(fpath) > MAX_SIZE:
-            error(f"File '{fpath}' exceeds size limit (10MB)")
+            error(f"File '{fpath}' exceeds size limit ({MAX_SIZE} bytes)")
         
         file_content = read_file(fpath)
         
@@ -271,7 +337,7 @@ def assemble_prompt(cfg: Config) -> List[Dict[str, Any]]:
     # Attach images
     for ipath in cfg.images:
         if os.path.getsize(ipath) > MAX_SIZE:
-            error(f"Image '{ipath}' exceeds size limit (10MB)")
+            error(f"Image '{ipath}' exceeds size limit ({MAX_SIZE} bytes)")
         mime_type = get_image_mime_type(ipath)
         file_data_base64 = file_to_base64(ipath)
         content.append({
@@ -288,7 +354,7 @@ def assemble_prompt(cfg: Config) -> List[Dict[str, Any]]:
         # Read up to MAX_SIZE
         stdin_bytes = sys.stdin.buffer.read(MAX_SIZE + 1)
         if len(stdin_bytes) > MAX_SIZE:
-            error("Standard input exceeds size limit (10MB)")
+            error(f"Standard input exceeds size limit ({MAX_SIZE} bytes)")
         
         try:
             stdin_data = stdin_bytes.decode("utf-8")
