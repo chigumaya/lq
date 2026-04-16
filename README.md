@@ -136,7 +136,7 @@ Note that it does not support text encodings other than UTF-8.
 
 Currently, the LLM must treat data specified as part of the prompt, even if it is intended not to be treated as such. Therefore, `lq` instructs the default system prompt to ignore any instructions contained within files or standard input provided via `-f` or `-i`.
 
-However, since different LLMs interpret instructions differently, and defense can potentially be bypassed by cleverly crafted payloads, complete countermeasures are difficult. While efforts have been made to reduce the risk of unintended command execution or role-playing attacks, this is merely a risk mitigation measure and should not be considered a guarantee.
+However, since different LLMs interpret instructions differently, and defense can potentially be bypassed by cleverly crafted payloads, complete countermeasures are difficult. While efforts have been made to reduce the risk of unintended command execution or role-playing attacks, this is merely a risk mitigation measure and should not be considered a guarantee. You should not use `lq` to handle untrusted data.
 
 ### Information Leakage
 
