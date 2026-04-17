@@ -225,29 +225,29 @@ def parse_args() -> argparse.Namespace:
         sys.exit(0)
     return args
 
-def read_file(path: str) -> Optional[str]:
-    """Read file content, trying UTF-8 first. Returns None if binary."""
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return f.read()
-    except UnicodeDecodeError:
-        # File is binary; return None to signal fallback to Base64
-        return None
-    except Exception as e:
-        error(f"Unable to read file '{path}': {e}")
-        return None
-
-def read_file_binary(path: str) -> bytes:
-    """Read file as binary data."""
+def read_path_bytes(path: str, max_size: int) -> bytes:
+    """Read bytes from a path-like input up to max_size."""
     try:
         with open(path, "rb") as f:
-            return f.read()
+            data = f.read(max_size + 1)
     except Exception as e:
         error(f"Unable to read file '{path}': {e}")
+        return b""
 
-def file_to_base64(path: str) -> str:
-    """Convert file content to base64 string."""
-    data = read_file_binary(path)
+    if len(data) > max_size:
+        error(f"File '{path}' exceeds size limit ({max_size} bytes)")
+
+    return data
+
+def decode_utf8_text(data: bytes) -> Optional[str]:
+    """Decode bytes as UTF-8 text, returning None for binary data."""
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+def bytes_to_base64(data: bytes) -> str:
+    """Convert bytes to a base64 string."""
     return base64.b64encode(data).decode("ascii")
 
 def _quote_attachment_value(value: str) -> str:
@@ -262,8 +262,8 @@ def _build_attachment_text(source: str, encoding: str, data: str, name: Optional
     parts.append(f"encoding={_quote_attachment_value(encoding)}")
     return f"Attachment: {', '.join(parts)}\n{data}"
 
-def _sniff_image_mime_type(path: str) -> Optional[str]:
-    """Detect an image MIME type from file content or extension."""
+def _sniff_image_mime_type(path: str, header: Optional[bytes] = None) -> Optional[str]:
+    """Detect an image MIME type from bytes or extension."""
     _, ext = os.path.splitext(path.lower())
 
     extension_mime_types = {
@@ -276,10 +276,7 @@ def _sniff_image_mime_type(path: str) -> Optional[str]:
         '.svg': 'image/svg+xml',
     }
 
-    try:
-        with open(path, 'rb') as f:
-            header = f.read(512)
-    except Exception:
+    if header is None:
         return extension_mime_types.get(ext)
 
     mime_type = _get_image_mime_type_from_bytes(header)
@@ -302,13 +299,14 @@ def _get_image_mime_type_from_bytes(header: bytes) -> Optional[str]:
         return 'image/bmp'
     return None
 
-def get_image_mime_type(path: str) -> str:
+def get_image_mime_type(path: str, data: Optional[bytes] = None) -> str:
     """Get MIME type for an image file.
 
     Prefers content sniffing so extensionless paths such as process
     substitution (`/dev/fd/*`) still get the correct MIME type.
     """
-    mime_type = _sniff_image_mime_type(path)
+    header = data[:512] if data is not None else None
+    mime_type = _sniff_image_mime_type(path, header)
     if mime_type:
         return mime_type
 
@@ -320,19 +318,17 @@ def assemble_prompt(cfg: Config) -> List[Dict[str, Any]]:
     content: List[Dict[str, Any]] = []
     
     # Max size for reading
-    MAX_SIZE = cfg.max_size
+    max_size = cfg.max_size
     
     # Attach file contents first so the executable instruction comes last.
     for fpath in cfg.files:
         filename = os.path.basename(fpath)
-        if os.path.getsize(fpath) > MAX_SIZE:
-            error(f"File '{fpath}' exceeds size limit ({MAX_SIZE} bytes)")
-        
-        file_content = read_file(fpath)
-        
+        file_data = read_path_bytes(fpath, max_size)
+        file_content = decode_utf8_text(file_data)
+
         if file_content is None:
             # Binary file: encode as Base64
-            file_data_base64 = file_to_base64(fpath)
+            file_data_base64 = bytes_to_base64(file_data)
             text_obj = _build_attachment_text("file", "base64", file_data_base64, filename)
         else:
             # Text file: embed as-is after a single metadata line.
@@ -345,10 +341,9 @@ def assemble_prompt(cfg: Config) -> List[Dict[str, Any]]:
     
     # Attach images
     for ipath in cfg.images:
-        if os.path.getsize(ipath) > MAX_SIZE:
-            error(f"Image '{ipath}' exceeds size limit ({MAX_SIZE} bytes)")
-        mime_type = get_image_mime_type(ipath)
-        file_data_base64 = file_to_base64(ipath)
+        image_data = read_path_bytes(ipath, max_size)
+        mime_type = get_image_mime_type(ipath, image_data)
+        file_data_base64 = bytes_to_base64(image_data)
         content.append({
             "type": "image_url",
             "image_url": {
@@ -361,15 +356,16 @@ def assemble_prompt(cfg: Config) -> List[Dict[str, Any]]:
     stdin_is_binary = False
     if not sys.stdin.isatty():
         # Read up to MAX_SIZE
-        stdin_bytes = sys.stdin.buffer.read(MAX_SIZE + 1)
-        if len(stdin_bytes) > MAX_SIZE:
-            error(f"Standard input exceeds size limit ({MAX_SIZE} bytes)")
-        
-        try:
-            stdin_data = stdin_bytes.decode("utf-8")
-        except UnicodeDecodeError:
-            stdin_data = base64.b64encode(stdin_bytes).decode("ascii")
+        stdin_bytes = sys.stdin.buffer.read(max_size + 1)
+        if len(stdin_bytes) > max_size:
+            error(f"Standard input exceeds size limit ({max_size} bytes)")
+
+        stdin_text = decode_utf8_text(stdin_bytes)
+        if stdin_text is None:
+            stdin_data = bytes_to_base64(stdin_bytes)
             stdin_is_binary = True
+        else:
+            stdin_data = stdin_text
     
     if stdin_data:
         if stdin_is_binary:
