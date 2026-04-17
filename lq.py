@@ -169,7 +169,7 @@ def load_config(args: argparse.Namespace) -> Config:
     if args.system:
         system_prompt += f"\n\n# USER INSTRUCTIONS\n{args.system}"
     elif args.system_file:
-        content = read_file(args.system_file)
+        content = read_file(args.system_file, max_size)
         if content:
             system_prompt += f"\n\n# USER INSTRUCTIONS\n{content}"
 
@@ -232,7 +232,6 @@ def read_path_bytes(path: str, max_size: int) -> bytes:
             data = f.read(max_size + 1)
     except Exception as e:
         error(f"Unable to read file '{path}': {e}")
-        return b""
 
     if len(data) > max_size:
         error(f"File '{path}' exceeds size limit ({max_size} bytes)")
@@ -246,9 +245,24 @@ def decode_utf8_text(data: bytes) -> Optional[str]:
     except UnicodeDecodeError:
         return None
 
+def read_file(path: str, max_size: int) -> str:
+    """Read a file as UTF-8 text, with size and encoding validation."""
+    data = read_path_bytes(path, max_size)
+    content = decode_utf8_text(data)
+    if content is None:
+        error(f"File '{path}' is not valid UTF-8 text")
+    return content
+
 def bytes_to_base64(data: bytes) -> str:
     """Convert bytes to a base64 string."""
     return base64.b64encode(data).decode("ascii")
+
+def _process_attachment_data(data: bytes, source: str, name: Optional[str] = None) -> str:
+    """Process raw bytes into a formatted attachment text (UTF-8 or Base64)."""
+    text_content = decode_utf8_text(data)
+    if text_content is None:
+        return _build_attachment_text(source, "base64", bytes_to_base64(data), name)
+    return _build_attachment_text(source, "utf-8", text_content, name)
 
 def _quote_attachment_value(value: str) -> str:
     """Quote an attachment metadata value for the Attachment header."""
@@ -307,83 +321,44 @@ def get_image_mime_type(path: str, data: Optional[bytes] = None) -> str:
     """
     header = data[:512] if data is not None else None
     mime_type = _sniff_image_mime_type(path, header)
-    if mime_type:
-        return mime_type
-
-    error(f"Unable to determine MIME type for image '{path}'")
+    if not mime_type:
+        error(f"Unable to determine MIME type for image '{path}'")
+    return mime_type
 
 def assemble_prompt(cfg: Config) -> List[Dict[str, Any]]:
     """Build content array with proper structure for injection mitigation.
     """
     content: List[Dict[str, Any]] = []
-    
-    # Max size for reading
     max_size = cfg.max_size
     
-    # Attach file contents first so the executable instruction comes last.
+    # Attach file contents
     for fpath in cfg.files:
-        filename = os.path.basename(fpath)
-        file_data = read_path_bytes(fpath, max_size)
-        file_content = decode_utf8_text(file_data)
-
-        if file_content is None:
-            # Binary file: encode as Base64
-            file_data_base64 = bytes_to_base64(file_data)
-            text_obj = _build_attachment_text("file", "base64", file_data_base64, filename)
-        else:
-            # Text file: embed as-is after a single metadata line.
-            text_obj = _build_attachment_text("file", "utf-8", file_content, filename)
-        
-        content.append({
-            "type": "text",
-            "text": text_obj
-        })
+        data = read_path_bytes(fpath, max_size)
+        text_obj = _process_attachment_data(data, "file", os.path.basename(fpath))
+        content.append({"type": "text", "text": text_obj})
     
     # Attach images
     for ipath in cfg.images:
         image_data = read_path_bytes(ipath, max_size)
         mime_type = get_image_mime_type(ipath, image_data)
-        file_data_base64 = bytes_to_base64(image_data)
+        base64_data = bytes_to_base64(image_data)
         content.append({
             "type": "image_url",
-            "image_url": {
-                "url": f"data:{mime_type};base64,{file_data_base64}"
-            }
+            "image_url": {"url": f"data:{mime_type};base64,{base64_data}"}
         })
     
     # Read from stdin
-    stdin_data = None
-    stdin_is_binary = False
     if not sys.stdin.isatty():
-        # Read up to MAX_SIZE
         stdin_bytes = sys.stdin.buffer.read(max_size + 1)
         if len(stdin_bytes) > max_size:
             error(f"Standard input exceeds size limit ({max_size} bytes)")
+        if stdin_bytes:
+            text_obj = _process_attachment_data(stdin_bytes, "stdin")
+            content.append({"type": "text", "text": text_obj})
 
-        stdin_text = decode_utf8_text(stdin_bytes)
-        if stdin_text is None:
-            stdin_data = bytes_to_base64(stdin_bytes)
-            stdin_is_binary = True
-        else:
-            stdin_data = stdin_text
-    
-    if stdin_data:
-        if stdin_is_binary:
-            piped_text = _build_attachment_text("stdin", "base64", stdin_data)
-        else:
-            piped_text = _build_attachment_text("stdin", "utf-8", stdin_data)
-        content.append({
-            "type": "text",
-            "text": piped_text
-        })
-
-    # Place user prompt LAST to reduce the chance of attached-data injection.
+    # Place user prompt LAST
     if cfg.prompt:
-        prompt_text = ' '.join(cfg.prompt)
-        content.append({
-            "type": "text",
-            "text": prompt_text  # Direct prompt, no <query> wrapper
-        })
+        content.append({"type": "text", "text": ' '.join(cfg.prompt)})
     
     if not content:
         error("No prompt provided.")
@@ -408,14 +383,9 @@ def build_payload(cfg: Config, user_content: List[Dict[str, Any]]) -> bytes:
 
 # Mask API key (show first 6 chars and last 4 chars, mask middle with ****)
 def _mask_api_key(key: str) -> str:
-    if not key:
+    if not key or len(key) <= 10:
         return "****"
-    # Get first 6 chars and last 4 chars
-    prefix = key[:6] if len(key) > 10 else key[:2]
-    suffix = key[-4:] if len(key) > 4 else key[-1:]
-    if len(key) <= 8:
-        return "****"
-    return f"{prefix}...{suffix}"
+    return f"{key[:6]}...{key[-4:]}"
 
 def call_api(cfg: Config, payload: bytes) -> Optional[str]:
     """Call an OpenAI-compatible Chat Completions API."""
