@@ -4,7 +4,7 @@
 
 A command-line tool for querying an LLM using data obtained from local files or standard input.
 
-Currently supports only OpenAI compatible API (`POST /chat/completions`).
+Currently supports OpenAI-compatible APIs that accept `messages[].content` as content arrays on `POST /chat/completions`.
 
 ## How to Use
 
@@ -130,11 +130,25 @@ On the other hand, even if an LLM does not support image input, sometimes you ca
 
 Note that it does not support text encodings other than UTF-8.
 
+Text attachments are sent as separate `user` messages. Each such message starts with a single metadata line, followed by the raw attachment body for the rest of the message:
+
+```text
+Attachment: source="file", name="README.md", encoding="utf-8"
+...file contents...
+```
+
+```text
+Attachment: source="stdin", encoding="base64"
+...base64 data...
+```
+
+Providers that only accept legacy flattened string prompts are not supported.
+
 ## Security Considerations
 
 ### Prompt Injection
 
-Currently, the LLM must treat data specified as part of the prompt, even if it is intended not to be treated as such. Therefore, `lq` instructs the default system prompt to ignore any instructions contained within files or standard input provided via `-f` or `-i`.
+Currently, the LLM must treat attached data as part of the prompt, even if it is intended not to be treated as executable instructions. Therefore, `lq` sends attachments in separate `user` messages and instructs the default system prompt to ignore any instructions contained within files, standard input, or image attachments.
 
 However, since different LLMs interpret instructions differently, and defense can potentially be bypassed by cleverly crafted payloads, complete countermeasures are difficult. While efforts have been made to reduce the risk of unintended command execution or role-playing attacks, this is merely a risk mitigation measure and should not be considered a guarantee. You should not use `lq` to handle untrusted data.
 
