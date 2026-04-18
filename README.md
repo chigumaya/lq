@@ -6,6 +6,14 @@ A command-line tool for querying an LLM using data obtained from local files or 
 
 Currently supports OpenAI-compatible APIs that accept `messages[].content` as content arrays on `POST /chat/completions`.
 
+## Installation
+
+Written in Python 3 with no non-standard dependencies. Simply copy it somewhere in your PATH.
+
+```
+install -m 755 lq.py /path/to/lq
+```
+
 ## How to Use
 
 ```

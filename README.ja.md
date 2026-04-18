@@ -6,6 +6,14 @@
 
 現時点では `POST /chat/completions` で `messages[].content` の content array を受け付ける OpenAI互換API に対応。
 
+## インストール
+
+python3で書かれているが非標準モジュールは使用していないので、パスの通ったところにコピーするだけでよい。
+
+```
+install -m 755 lq.py /path/to/lq
+```
+
 ## 使いかた
 
 ```

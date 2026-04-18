@@ -123,10 +123,10 @@ def load_config(args: argparse.Namespace) -> Config:
     # Validation
     if not api_url:
         error("API URL not configured. Use API_URL env var or config file.")
+    if not re.match(r'^https?://', api_url):
+        error(f"Invalid API URL '{api_url}': must start with http:// or https://")
     if not model:
         error("Model not configured. Use MODEL env var, -m option, or config file.")
-    if args.prompt is None:  # Handle case where no prompt is provided
-        args.prompt = []
 
     # Resolve max_size: CLI argument > Config file > Default (10MB)
     DEFAULT_MAX_SIZE = 10 * 1024 * 1024  # 10MB
@@ -168,7 +168,7 @@ def load_config(args: argparse.Namespace) -> Config:
 
     if args.system:
         system_prompt += f"\n\n# USER INSTRUCTIONS\n{args.system}"
-    elif args.system_file:
+    if args.system_file:
         content = read_file(args.system_file, max_size)
         if content:
             system_prompt += f"\n\n# USER INSTRUCTIONS\n{content}"
@@ -214,7 +214,7 @@ def parse_args() -> argparse.Namespace:
                         help="Output raw JSON response instead of extracting content")
     parser.add_argument("--debug", action="store_true", default=False, dest="debug",
                         help="Debug mode: print request details to stderr")
-    parser.add_argument("prompt", nargs=argparse.REMAINDER, help="User prompt (if omitted, read from stdin)")
+    parser.add_argument("prompt", nargs=argparse.REMAINDER, help="User prompt")
     args = parser.parse_args()
     # Handle help / version early
     if args.help:
