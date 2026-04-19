@@ -4,19 +4,19 @@
 
 A command-line tool for querying an LLM using data obtained from local files or standard input.
 
-Currently supports OpenAI-compatible APIs that accept `messages[].content` as content arrays on `POST /chat/completions`.
+Currently supports only OpenAI compatible API (`POST /chat/completions`).
 
 ## Installation
 
 Written in Python 3 with no non-standard dependencies. Simply copy it somewhere in your PATH.
 
-```
+```bash
 install -m 755 lq.py /path/to/lq
 ```
 
 ## How to Use
 
-```
+```bash
 lq [OPTIONS] <prompt>
 ```
 
@@ -31,6 +31,7 @@ lq [OPTIONS] <prompt>
 -m, --model <name>                 Specifies the model to use
 -M, --max-size <size>              Maximum input size (Default: 10MB)
 -j, --json                         Outputs raw JSON response
+--no-stream                        Disable streaming output
 --debug                            Debug mode (outputs request information to stderr)
 -h, --help                         Displays help
 -v, --version                      Displays version
@@ -68,7 +69,7 @@ Configured in `~/.config/lq/config.json`. A different path can be specified usin
 ### Environment Variables
 
 Settings equivalent to the configuration file can also be specified via environment variables.
-```
+```bash
 API_URL=http://localhost:11434/v1  URL of the API endpoint
 API_KEY=sk-...                     API key (optional)
 MODEL=gpt-oss-20b                  Model name
@@ -119,7 +120,7 @@ In descending order of priority:
 ### Handling of Files (`-f`) and Images (`-i`)
 
 If you specify an image file using `-f` instead of `-i`, like this:
-```
+```bash
 % lq -f image.png 'what is this image?'
 ```
 the file will be sent to the LLM as base64 encoded binary data, not as an image. When sent as an image, the LLM performs dedicated image processing, and token consumption is very low. However, when sent as base64 encoded data, it is treated as text data, which can result in extremely high token consumption—be aware of this.
@@ -138,25 +139,11 @@ On the other hand, even if an LLM does not support image input, sometimes you ca
 
 Note that it does not support text encodings other than UTF-8.
 
-Text attachments are sent as separate `user` messages. Each such message starts with a single metadata line, followed by the raw attachment body for the rest of the message:
-
-```text
-Attachment: source="file", name="README.md", encoding="utf-8"
-...file contents...
-```
-
-```text
-Attachment: source="stdin", encoding="base64"
-...base64 data...
-```
-
-Providers that only accept legacy flattened string prompts are not supported.
-
 ## Security Considerations
 
 ### Prompt Injection
 
-Currently, the LLM must treat attached data as part of the prompt, even if it is intended not to be treated as executable instructions. Therefore, `lq` sends attachments in separate `user` messages and instructs the default system prompt to ignore any instructions contained within files, standard input, or image attachments.
+Currently, the LLM must treat attached data as part of the prompt, even if it is intended not to be treated as executable instructions. Therefore, `lq` instructs the system prompt to ignore any instructions contained within files, standard input, or image attachments.
 
 However, since different LLMs interpret instructions differently, and defense can potentially be bypassed by cleverly crafted payloads, complete countermeasures are difficult. While efforts have been made to reduce the risk of unintended command execution or role-playing attacks, this is merely a risk mitigation measure and should not be considered a guarantee. You should not use `lq` to handle untrusted data.
 

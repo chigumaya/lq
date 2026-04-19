@@ -28,6 +28,7 @@ class Config:
     max_size: int  # Maximum size for file/stdin reads in bytes
     output_json: bool = False
     debug: bool = False
+    stream: bool = True
 
 def parse_size(size_str: str) -> int:
     """Parse a size string with optional units (B, KB, MB, GB) to bytes.
@@ -195,7 +196,8 @@ def load_config(args: argparse.Namespace) -> Config:
         prompt=args.prompt or [],
         max_size=max_size,
         output_json=args.output_json,
-        debug=args.debug
+        debug=args.debug,
+        stream=args.stream and not args.output_json and sys.stdout.isatty()
     )
 
 
@@ -224,6 +226,8 @@ def parse_args() -> argparse.Namespace:
                         help="Maximum size for file/stdin reads (e.g. 5MB, 1024KB)")
     parser.add_argument("-j", "--json", action="store_true", dest="output_json",
                         help="Output raw JSON response instead of extracting content")
+    parser.add_argument("--no-stream", action="store_false", dest="stream", default=True,
+                        help="Disable streaming output (default: enabled when stdout is a TTY)")
     parser.add_argument("--debug", action="store_true", default=False, dest="debug",
                         help="Debug mode: print request details to stderr")
     parser.add_argument("prompt", nargs=argparse.REMAINDER, help="User prompt")
@@ -390,6 +394,7 @@ def build_payload(cfg: Config, user_content: List[Dict[str, Any]]) -> bytes:
     payload = {
         "model": cfg.model,
         "messages": messages,
+        "stream": cfg.stream,
     }
     return json.dumps(payload).encode("utf-8")
 
@@ -403,9 +408,33 @@ def call_api(cfg: Config, payload: bytes) -> Optional[str]:
     """Call an OpenAI-compatible Chat Completions API."""
     endpoint = cfg.api_url.rstrip('/') + "/chat/completions"
     auth_header = f"Bearer {cfg.api_key}" if cfg.api_key else None
-    return _try_api_call(endpoint, payload, auth_header, cfg.debug, cfg.output_json)
+    return _try_api_call(endpoint, payload, auth_header, cfg.debug, cfg.output_json, cfg.stream)
 
-def _try_api_call(endpoint: str, payload: bytes, auth_header: Optional[str], debug: bool, output_json: bool) -> Optional[str]:
+def _parse_sse_line(line: str) -> Optional[tuple]:
+    """Parse an SSE line and extract data content.
+
+    Returns a tuple of (is_done: bool, content: Optional[str]).
+    is_done is True when the stream ends with [DONE].
+    content is None if no content was extracted from this line.
+    """
+    line = line.rstrip('\r\n')
+    if not line.startswith("data:"):
+        return None
+    data = line[5:].lstrip()  # Remove 'data:' prefix and optional whitespace
+    if data == "[DONE]":
+        return (True, None)
+    try:
+        parsed = json.loads(data)
+        choices = parsed.get("choices", [])
+        if not choices:
+            return None
+        delta = choices[0].get("delta", {})
+        content = delta.get("content")
+        return (False, content) if content else None
+    except (json.JSONDecodeError, KeyError, IndexError):
+        return None
+
+def _try_api_call(endpoint: str, payload: bytes, auth_header: Optional[str], debug: bool, output_json: bool, stream: bool) -> Optional[str]:
     """Execute a single API call attempt."""
     headers_to_log = {
         "Content-Type": "application/json",
@@ -434,17 +463,21 @@ def _try_api_call(endpoint: str, payload: bytes, auth_header: Optional[str], deb
     
     try:
         with urllib.request.urlopen(req, timeout=120) as resp:
-            raw = json.loads(resp.read())
-            if output_json:
-                return json.dumps(raw)
+            if stream:
+                full_text = _handle_streaming(resp, debug, output_json)
+                return full_text
             else:
-                # Extract content from OpenAI format
-                choices = raw.get("choices", [])
-                if not choices:
-                    error(f"API response contains no choices")
-                message = choices[0].get("message", {})
-                content = message.get("content", "")
-                return content
+                raw = json.loads(resp.read())
+                if output_json:
+                    return json.dumps(raw)
+                else:
+                    # Extract content from OpenAI format
+                    choices = raw.get("choices", [])
+                    if not choices:
+                        error(f"API response contains no choices")
+                    message = choices[0].get("message", {})
+                    content = message.get("content", "")
+                    return content
     except json.JSONDecodeError as e:
         error(f"Invalid JSON from API: {e}")
     except urllib.error.HTTPError as e:
@@ -453,13 +486,44 @@ def _try_api_call(endpoint: str, payload: bytes, auth_header: Optional[str], deb
     except urllib.error.URLError as e:
         error(f"Network request failed: {e.reason}")
 
+def _handle_streaming(resp, debug: bool, output_json: bool) -> str:
+    """Handle streaming response from API. Returns the full accumulated text."""
+    chunks = []
+    
+    if output_json:
+        raw_lines = []
+        for line in resp:
+            decoded = line.decode("utf-8", errors="ignore").strip()
+            if decoded:
+                raw_lines.append(decoded)
+        return json.dumps(raw_lines, ensure_ascii=False)
+    
+    for line in resp:
+        decoded = line.decode("utf-8", errors="ignore")
+        result = _parse_sse_line(decoded)
+        if result is None:
+            continue
+        is_done, content = result
+        if is_done:
+            break
+        if content is not None:
+            sys.stdout.write(content)
+            sys.stdout.flush()
+            chunks.append(content)
+    
+    return "".join(chunks)
+
 def main():
     args = parse_args()
     cfg = load_config(args)
     user_content = assemble_prompt(cfg)
     payload = build_payload(cfg, user_content)
     response = call_api(cfg, payload)
-    print(response)
+    if not cfg.stream:
+        print(response)
+    else:
+        sys.stdout.write("\n")
+        sys.stdout.flush()
 
 if __name__ == "__main__":
     main()
