@@ -10,6 +10,7 @@ import json
 import base64
 import urllib.request
 import urllib.error
+import stat
 from dataclasses import dataclass
 from typing import List, Optional, Dict, Any, Union
 
@@ -88,6 +89,17 @@ def load_config(args: argparse.Namespace) -> Config:
     config_path = args.config or os.path.expanduser("~/.config/lq/config.json")
     config_data: dict = {}
     if os.path.isfile(config_path):
+        # Check permissions (Unix-style only)
+        if sys.platform != "win32":
+            try:
+                st = os.stat(config_path)
+                mode = stat.S_IMODE(st.st_mode)
+                if mode & 0o044:
+                    sys.stderr.write(f"Warning: config file '{config_path}' is readable by others. "
+                                     "It is recommended to set permissions to 600.\n")
+            except OSError:
+                pass
+
         try:
             with open(config_path, "r", encoding="utf-8") as f:
                 config_data = json.load(f)
