@@ -220,7 +220,7 @@ def load_config(args: argparse.Namespace) -> Config:
     )
 
 
-def resolve_template(template_name: str, template_prompt: str, defaults: list, cli_args: List[str]) -> str:
+def resolve_template(template_name: str, template_prompt: str, defaults: List[Any], cli_args: List[str]) -> str:
     """Resolve a template by replacing %s with CLI args or default values.
     
     Args:
@@ -241,21 +241,28 @@ def resolve_template(template_name: str, template_prompt: str, defaults: list, c
     if placeholder_count == 0:
         return template_prompt
     
+    parts = template_prompt.split("%s")
     resolved_parts = []
     arg_index = 0
     
     for i in range(placeholder_count):
         if arg_index < len(cli_args):
             # Use CLI argument
-            resolved_parts.append(template_prompt.split("%s")[i] + cli_args[i])
+            resolved_parts.append(parts[i] + cli_args[arg_index])
             arg_index += 1
         elif i < len(defaults) and defaults[i] is not None:
             # Use default value
-            resolved_parts.append(template_prompt.split("%s")[i] + str(defaults[i]))
+            resolved_parts.append(parts[i] + str(defaults[i]))
+        elif i < len(defaults) and defaults[i] is None:
+            # Explicit None means it's a required argument that wasn't provided
+            error(f"Template '{template_name}': missing argument for placeholder %d (of %d)" % (i + 1, placeholder_count))
         else:
             error(f"Template '{template_name}': missing argument for placeholder %d (of %d)" % (i + 1, placeholder_count))
     
-    resolved_parts.append(template_prompt.split("%s")[-1])
+    if arg_index < len(cli_args):
+        error(f"Template '{template_name}': too many arguments ({len(cli_args)} provided, {placeholder_count} expected)")
+    
+    resolved_parts.append(parts[-1])
     return "".join(resolved_parts)
 
 
@@ -303,8 +310,6 @@ def parse_args() -> argparse.Namespace:
         add_help=False,
     )
     # Custom help handling to keep language consistent
-    parser.add_argument("-h", "--help", action="store_true", help="show this help message and exit")
-    parser.add_argument("-v", "--version", action="store_true", help="print version and exit")
     parser.add_argument("-f", "--file", action="append", dest="files", metavar="FILENAME",
                         help="Attach file content to prompt (can be used multiple times)")
     parser.add_argument("-i", "--image", action="append", dest="images", metavar="FILENAME",
@@ -327,6 +332,8 @@ def parse_args() -> argparse.Namespace:
                         help="Disable streaming output (default: enabled when stdout is a TTY)")
     parser.add_argument("--debug", action="store_true", default=False, dest="debug",
                         help="Debug mode: print request details to stderr")
+    parser.add_argument("-h", "--help", action="store_true", help="show this help message and exit")
+    parser.add_argument("-v", "--version", action="store_true", help="print version and exit")
     parser.add_argument("prompt", nargs=argparse.REMAINDER, help="User prompt or template arguments")
     args = parser.parse_args()
     # Handle help / version early

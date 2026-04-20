@@ -7,6 +7,8 @@ from lq import (
     _process_attachment_data,
     _parse_sse_line,
     _handle_streaming,
+    resolve_template,
+    load_templates,
 )
 
 class TestLQ(unittest.TestCase):
@@ -133,6 +135,114 @@ class TestStreaming(unittest.TestCase):
         chunks.append(b'\ndata: [DONE]\n')
         result = _handle_streaming(self._make_mock_resp(chunks), False, False)
         self.assertEqual(result, "01234")
+
+
+class TestResolveTemplate(unittest.TestCase):
+    def test_no_placeholders(self):
+        result = resolve_template("explain", "explain this code", [], [])
+        self.assertEqual(result, "explain this code")
+
+    def test_single_placeholder_with_default(self):
+        result = resolve_template("sum", "summarize in %s lines", [3], [])
+        self.assertEqual(result, "summarize in 3 lines")
+
+    def test_single_placeholder_cli_override(self):
+        result = resolve_template("sum", "summarize in %s lines", [3], ["5"])
+        self.assertEqual(result, "summarize in 5 lines")
+
+    def test_multiple_placeholders_all_provided(self):
+        result = resolve_template("count", "count \"%s\" and \"%s\"", [], ["Python", "Java"])
+        self.assertEqual(result, 'count "Python" and "Java"')
+
+    def test_mixed_defaults_none_and_value(self):
+        result = resolve_template("test", "%s is %s", [None, "great"], ["AI"])
+        self.assertEqual(result, "AI is great")
+
+    def test_all_cli_args_override_defaults(self):
+        result = resolve_template("sum", "explain %s in %s words", [100, "simple"], ["Python", "50"])
+        self.assertEqual(result, "explain Python in 50 words")
+
+    def test_missing_required_arg_raises_error(self):
+        with self.assertRaises(SystemExit):
+            resolve_template("count", "count \"%s\" and \"%s\"", [], ["Python"])
+
+    def test_missing_default_value_raises_error(self):
+        with self.assertRaises(SystemExit):
+            resolve_template("sum", "in %s lines", [None], [])
+
+    def test_numeric_default_converted_to_string(self):
+        result = resolve_template("sum", "in %s lines", [3], [])
+        self.assertEqual(result, "in 3 lines")
+
+    def test_multiple_placeholders_with_partial_defaults(self):
+        # 3 placeholders, defaults [auto, None] -> arg 1 (first), arg 2 (auto), arg 3 (None -> missing)
+        # Wait, the prompt has 3 placeholders. defaults has 2.
+        # This test case seems fundamentally flawed if it expects "None" as a string.
+        # Let's fix the test expectation to match the logic (error on missing).
+        with self.assertRaises(SystemExit):
+            resolve_template("test", "%s and %s and %s", ["auto", None], ["first"])
+
+    def test_extra_cli_args_raises_error(self):
+        with self.assertRaises(SystemExit):
+            resolve_template("sum", "summarize in %s lines", [], ["5", "extra_arg"])
+
+
+class TestLoadTemplates(unittest.TestCase):
+    def test_no_templates_key(self):
+        result = load_templates({})
+        self.assertEqual(result, {})
+
+    def test_empty_templates_array(self):
+        result = load_templates({"templates": []})
+        self.assertEqual(result, {})
+
+    def test_valid_template_entry(self):
+        config = {"templates": [{"name": "sum", "prompt": "summarize %s"}]}
+        result = load_templates(config)
+        self.assertIn("sum", result)
+        prompt, defaults = result["sum"]
+        self.assertEqual(prompt, "summarize %s")
+        self.assertEqual(defaults, [])
+
+    def test_template_with_defaults(self):
+        config = {"templates": [{"name": "sum", "prompt": "%s lines", "defaults": [3]}]}
+        result = load_templates(config)
+        prompt, defaults = result["sum"]
+        self.assertEqual(prompt, "%s lines")
+        self.assertEqual(defaults, [3])
+
+    def test_multiple_templates(self):
+        config = {
+            "templates": [
+                {"name": "a", "prompt": "first %s"},
+                {"name": "b", "prompt": "second %s"}
+            ]
+        }
+        result = load_templates(config)
+        self.assertIn("a", result)
+        self.assertIn("b", result)
+
+    def test_template_with_null_default(self):
+        config = {"templates": [{"name": "t", "prompt": "%s and %s", "defaults": [None, "foo"]}]}
+        result = load_templates(config)
+        prompt, defaults = result["t"]
+        self.assertEqual(defaults, [None, "foo"])
+
+    def test_invalid_templates_not_array(self):
+        with self.assertRaises(SystemExit):
+            load_templates({"templates": "invalid"})
+
+    def test_template_missing_name_raises_error(self):
+        with self.assertRaises(SystemExit):
+            load_templates({"templates": [{"prompt": "no name"}]})
+
+    def test_template_prompt_must_be_string(self):
+        with self.assertRaises(SystemExit):
+            load_templates({"templates": [{"name": "t", "prompt": 123}]})
+
+    def test_template_defaults_must_be_array(self):
+        with self.assertRaises(SystemExit):
+            load_templates({"templates": [{"name": "t", "prompt": "x", "defaults": "not array"}]})
 
 
 if __name__ == "__main__":
