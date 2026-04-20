@@ -29,6 +29,7 @@ lq [OPTIONS] <prompt>
 -S, --system-file <filename>       Reads the additional system prompt from a file
 -c, --config <path>                Path to the configuration file (Default: ~/.config/lq/config.json)
 -m, --model <name>                 Specifies the model to use
+-t, --template <name>              Use prompt template
 -M, --max-size <size>              Maximum input size (Default: 10MB)
 -j, --json                         Outputs raw JSON response
 --no-stream                        Disable streaming output
@@ -62,6 +63,13 @@ Configured in `~/.config/lq/config.json`. A different path can be specified usin
       "api_url": "https://example.net/v1",
       "api_key": "sk-bar-key"
     }
+  ],
+  "templates": [
+    {
+      "name": "summary",
+      "prompt": "summarize this in %s lines",
+      "defaults": [ "3" ]
+    }
   ]
 }
 ```
@@ -70,9 +78,12 @@ Configured in `~/.config/lq/config.json`. A different path can be specified usin
 
 Settings equivalent to the configuration file can also be specified via environment variables.
 ```bash
-API_URL=http://localhost:11434/v1  URL of the API endpoint
-API_KEY=sk-...                     API key (optional)
-MODEL=gpt-oss-20b                  Model name
+# URL of the API endpoint
+export API_URL="http://localhost:11434/v1"
+# API key (optional)
+export API_KEY="sk-..."
+# Model name
+export MODEL="gpt-oss-20b"
 ```
 
 ### Priority of Configuration Values
@@ -105,7 +116,7 @@ In descending order of priority:
 % diff file-A file-B | lq 'summarize the differences'
 
 # Analyze logs
-% tail /var/log/messages | lq 'diagnose problems from these logs'
+% tail -100 /var/log/messages | lq 'diagnose problems from these logs'
 
 # Translate text
 % man curl | lq 'translate to Japanese'
@@ -116,6 +127,48 @@ In descending order of priority:
 # Generate commit message
 % git commit -m "$(git diff | lq 'summarize the difference in 3 lines')"
 ```
+
+### Prompt Templates
+
+You can define frequently used prompts as templates in the configuration file.
+
+```json
+"templates": [
+  {
+    "name": "summary",
+    "prompt": "summarize this in %s lines",
+    "defaults": [ "3" ]
+  }
+]
+```
+
+This template can be called with `-t` (`--template`). The `%s` within the template is replaced by a command-line argument. For example, the following commands are treated as the same prompt:
+
+```bash
+lq -t summary 5
+lq "summarize this in 5 lines"
+```
+
+If parameters are omitted on the command line, the value specified in `"defaults"` is used.
+
+```bash
+lq -t summary
+lq "summarize this in 3 lines"
+```
+
+If `"defaults"` is not specified, a parameter is required.
+
+It is also possible to define templates requiring multiple parameters:
+
+```json
+  {
+    "name": "foo",
+	"prompt": "get %s and run %s",
+	"defaults":[ null, "bar" ]
+  }
+```
+
+In this example, the first parameter is required, and the second parameter defaults to `"bar"` if omitted.
 
 ### Handling of Files (`-f`) and Images (`-i`)
 
@@ -149,7 +202,7 @@ However, since different LLMs interpret instructions differently, and defense ca
 
 ### Information Leakage
 
-Files passed via `-f`, images passed via `-i`, and data passed from standard input are all sent to the LLM as part of the prompt. Even if these data contain passwords, secret keys, authentication tokens, or other confidential information, they will be sent without masking. Therefore, extreme caution is advised when using cloud LLM services. For such use cases, consider using a local LLM.
+Files passed via `-f`, images passed via `-i`, and data passed from standard input are all sent to the LLM as part of the prompt. Even if these data contain passwords, private keys, authentication tokens, or other confidential information, they will be sent without masking. Therefore, extreme caution is advised when using cloud LLM services. For such use cases, consider using a local LLM.
 
 ## Author
 

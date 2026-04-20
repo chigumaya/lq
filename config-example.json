@@ -16,5 +16,12 @@
       "api_url": "https://example.net/v1",
       "api_key": "sk-..."
     }
+  ],
+  "templates": [
+    {
+      "name": "summary",
+      "prompt": "summarize this in %s lines",
+      "defaults": [ "3" ]
+    }
   ]
 }

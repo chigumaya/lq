@@ -29,6 +29,7 @@ lq [OPTIONS] <prompt>
 -S, --system-file <filename>       追加システムプロンプトをファイルから読む
 -c, --config <path>                設定ファイルのパス（デフォルト: ~/.config/lq/config.json）
 -m, --model <name>                 使用するモデルを指定
+-t, --template <name>              テンプレート呼び出し
 -M, --max-size <size>              入力サイズの上限 (デフォルト: 10MB)
 -j, --json                         生のJSON応答を出力
 --no-stream                        ストリーム出力を無効にする
@@ -62,6 +63,13 @@ lq [OPTIONS] <prompt>
       "api_url": "https://example.net/v1",
       "api_key": "sk-bar-key"
     }
+  ],
+  "templates": [
+    {
+      "name": "summary",
+      "prompt": "summarize this in %s lines",
+      "defaults": [ "3" ]
+    }
   ]
 }
 ```
@@ -70,9 +78,12 @@ lq [OPTIONS] <prompt>
 
 設定ファイルと同等の設定は環境変数でも指定できる。
 ```bash
-API_URL=http://localhost:11434/v1  APIエンドポイントのURL
-API_KEY=sk-...                     APIキー（オプション）
-MODEL=gpt-oss-20b                  モデル名
+# APIエンドポイントのURL
+export API_URL="http://localhost:11434/v1"
+# APIキー（オプション）
+export API_KEY="sk-..."
+# モデル名
+export MODEL="gpt-oss-20b"
 ```
 
 ### 設定値の優先度
@@ -116,6 +127,47 @@ MODEL=gpt-oss-20b                  モデル名
 # コミットメッセージを生成
 % git commit -m "$(git diff | lq '差分を3行で要約して')"
 ```
+
+### プロンプトテンプレート
+
+よく使うプロンプトをテンプレートとして設定ファイルに定義できる。
+
+```json
+"templates": [
+  {
+    "name": "summary",
+    "prompt": "%s行で要約して",
+    "defaults": [ "3" ]
+  }
+]
+```
+
+このテンプレートは `-t` (`--template`) で呼び出すことができる。テンプレート中の `%s` はコマンドライン引数で置換される。たとえば、以下のコマンドは同じプロンプトを指定したものとして扱われる。
+```bash
+lq -t summary 5
+lq "5行で要約して"
+```
+
+コマンドラインでパラメータを省略した場合は、`"defaults"`で指定された値が使われる。
+
+```bash
+lq -t summary
+lq "3行で要約して"
+```
+
+`"defaults"` が指定されていない場合、パラメータの指定は必須。
+
+複数のパラメータが必要なテンプレートも定義可能。
+
+```json
+  {
+    "name": "foo",
+	"prompt": "get %s and run %s",
+	"defaults":[ null, "bar" ]
+  }
+```
+
+この例の場合、最初のパラメータは省略不可、2番目のパラメータは省略時に bar という値が使われる。
 
 ### ファイル(-f)と画像(-i)の扱い
 
