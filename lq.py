@@ -114,6 +114,25 @@ def load_config(args: argparse.Namespace) -> Config:
     if not isinstance(defaults, dict):
         error(f"Invalid config file '{config_path}': 'defaults' must be a JSON object")
     
+    # Load templates
+    templates = load_templates(config_data)
+    
+    # Resolve template if specified
+    prompt_args: List[str] = []
+    resolved_prompt = None
+    
+    if args.template:
+        if args.template not in templates:
+            error(f"Template '{args.template}' not found")
+        
+        template_prompt, template_defaults = templates[args.template]
+        # CLI args after -t are template arguments; remaining prompt is user input
+        # argparse puts everything after -t into prompt as REMAINDER
+        resolved_prompt = resolve_template(args.template, template_prompt, template_defaults, args.prompt)
+        prompt_args = []  # Template handles all %s substitution
+    elif args.prompt:
+        resolved_prompt = " ".join(args.prompt)
+    
     # Model selection for named config entries
     selected_name = args.model or defaults.get("model_name")
     
@@ -193,12 +212,88 @@ def load_config(args: argparse.Namespace) -> Config:
         system_prompt=system_prompt,
         files=args.files or [],
         images=args.images or [],
-        prompt=args.prompt or [],
+        prompt=prompt_args if resolved_prompt is None else [resolved_prompt],
         max_size=max_size,
         output_json=args.output_json,
         debug=args.debug,
         stream=args.stream and not args.output_json and sys.stdout.isatty()
     )
+
+
+def resolve_template(template_name: str, template_prompt: str, defaults: list, cli_args: List[str]) -> str:
+    """Resolve a template by replacing %s with CLI args or default values.
+    
+    Args:
+        template_name: Name of the template (for error messages)
+        template_prompt: Template prompt string with %s placeholders
+        defaults: Default values list (None means required, str means optional default)
+        cli_args: Command-line argument strings provided by user
+        
+    Returns:
+        Resolved prompt string
+        
+    Raises:
+        SystemExit: If template not found or arguments are missing
+    """
+    # Count %s placeholders
+    placeholder_count = template_prompt.count("%s")
+    
+    if placeholder_count == 0:
+        return template_prompt
+    
+    resolved_parts = []
+    arg_index = 0
+    
+    for i in range(placeholder_count):
+        if arg_index < len(cli_args):
+            # Use CLI argument
+            resolved_parts.append(template_prompt.split("%s")[i] + cli_args[i])
+            arg_index += 1
+        elif i < len(defaults) and defaults[i] is not None:
+            # Use default value
+            resolved_parts.append(template_prompt.split("%s")[i] + str(defaults[i]))
+        else:
+            error(f"Template '{template_name}': missing argument for placeholder %d (of %d)" % (i + 1, placeholder_count))
+    
+    resolved_parts.append(template_prompt.split("%s")[-1])
+    return "".join(resolved_parts)
+
+
+def load_templates(config_data: dict) -> Dict[str, tuple]:
+    """Load templates from config data.
+    
+    Returns:
+        Dictionary mapping template name to (prompt, defaults) tuple
+        
+    Raises:
+        SystemExit: If templates are invalid
+    """
+    if "templates" not in config_data:
+        return {}
+    
+    templates_raw = config_data["templates"]
+    if not isinstance(templates_raw, list):
+        error("'templates' must be a JSON array")
+    
+    templates = {}
+    for entry in templates_raw:
+        if not isinstance(entry, dict):
+            error("Each template entry must be a JSON object")
+        
+        name = entry.get("name")
+        prompt = entry.get("prompt", "")
+        defaults = entry.get("defaults", [])
+        
+        if not name or not isinstance(name, str):
+            error("Template entry missing 'name' (must be string)")
+        if not isinstance(prompt, str):
+            error(f"Template '{name}': 'prompt' must be a string")
+        if not isinstance(defaults, list):
+            error(f"Template '{name}': 'defaults' must be an array")
+        
+        templates[name] = (prompt, defaults)
+    
+    return templates
 
 
 def parse_args() -> argparse.Namespace:
@@ -224,13 +319,15 @@ def parse_args() -> argparse.Namespace:
                         help="Select model (overrides defaults.model_name in config file)")
     parser.add_argument("-M", "--max-size", dest="max_size", metavar="SIZE",
                         help="Maximum size for file/stdin reads (e.g. 5MB, 1024KB)")
+    parser.add_argument("-t", "--template", dest="template", metavar="NAME",
+                        help="Use a prompt template from config")
     parser.add_argument("-j", "--json", action="store_true", dest="output_json",
                         help="Output raw JSON response instead of extracting content")
     parser.add_argument("--no-stream", action="store_false", dest="stream", default=True,
                         help="Disable streaming output (default: enabled when stdout is a TTY)")
     parser.add_argument("--debug", action="store_true", default=False, dest="debug",
                         help="Debug mode: print request details to stderr")
-    parser.add_argument("prompt", nargs=argparse.REMAINDER, help="User prompt")
+    parser.add_argument("prompt", nargs=argparse.REMAINDER, help="User prompt or template arguments")
     args = parser.parse_args()
     # Handle help / version early
     if args.help:
