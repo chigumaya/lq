@@ -1,6 +1,10 @@
 import json
+import os
+import sys
+import tempfile
 import unittest
 from io import BytesIO
+from unittest.mock import patch, MagicMock
 from lq import (
     parse_size,
     _mask_api_key,
@@ -9,6 +13,11 @@ from lq import (
     _handle_streaming,
     resolve_template,
     load_templates,
+    build_payload,
+    assemble_prompt,
+    call_api,
+    _try_api_call,
+    Config,
 )
 
 class TestLQ(unittest.TestCase):
@@ -243,6 +252,273 @@ class TestLoadTemplates(unittest.TestCase):
     def test_template_defaults_must_be_array(self):
         with self.assertRaises(SystemExit):
             load_templates({"templates": [{"name": "t", "prompt": "x", "defaults": "not array"}]})
+
+
+class TestBuildPayload(unittest.TestCase):
+    def test_basic_payload(self):
+        cfg = Config(
+            api_url="http://localhost:1234/v1",
+            api_key="test-key",
+            model="test-model",
+            system_prompt="You are helpful.",
+            files=[],
+            images=[],
+            prompt=["Hello"],
+            max_size=10 * 1024 * 1024,
+            output_json=False,
+            debug=False,
+            stream=True,
+        )
+        user_content = [{"type": "text", "text": "Hello"}]
+        payload_bytes = build_payload(cfg, user_content)
+        payload = json.loads(payload_bytes)
+
+        self.assertEqual(payload["model"], "test-model")
+        self.assertTrue(payload["stream"])
+        messages = payload["messages"]
+        self.assertEqual(len(messages), 2)
+        self.assertEqual(messages[0]["role"], "system")
+        self.assertEqual(messages[0]["content"], "You are helpful.")
+        self.assertEqual(messages[1]["role"], "user")
+        self.assertEqual(messages[1]["content"], user_content)
+
+    def test_payload_no_system_prompt(self):
+        cfg = Config(
+            api_url="http://localhost:1234/v1",
+            api_key="",
+            model="test-model",
+            system_prompt=None,
+            files=[],
+            images=[],
+            prompt=["Hello"],
+            max_size=10 * 1024 * 1024,
+            output_json=False,
+            debug=False,
+            stream=True,
+        )
+        user_content = [{"type": "text", "text": "Hello"}]
+        payload_bytes = build_payload(cfg, user_content)
+        payload = json.loads(payload_bytes)
+
+        self.assertEqual(len(payload["messages"]), 1)
+        self.assertEqual(payload["messages"][0]["role"], "user")
+
+    def test_payload_stream_false(self):
+        cfg = Config(
+            api_url="http://localhost:1234/v1",
+            api_key="",
+            model="test-model",
+            system_prompt=None,
+            files=[],
+            images=[],
+            prompt=["Hello"],
+            max_size=10 * 1024 * 1024,
+            output_json=False,
+            debug=False,
+            stream=False,
+        )
+        user_content = [{"type": "text", "text": "Hello"}]
+        payload_bytes = build_payload(cfg, user_content)
+        payload = json.loads(payload_bytes)
+
+        self.assertFalse(payload["stream"])
+
+    def test_payload_multiple_user_contents(self):
+        cfg = Config(
+            api_url="http://localhost:1234/v1",
+            api_key="",
+            model="test-model",
+            system_prompt=None,
+            files=[],
+            images=[],
+            prompt=["Hello"],
+            max_size=10 * 1024 * 1024,
+            output_json=False,
+            debug=False,
+            stream=True,
+        )
+        user_content = [
+            {"type": "text", "text": "First block"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,abc"}},
+        ]
+        payload_bytes = build_payload(cfg, user_content)
+        payload = json.loads(payload_bytes)
+
+        messages = payload["messages"]
+        self.assertEqual(len(messages), 2)
+        # Each content block gets its own message
+        self.assertEqual(messages[0]["content"], [{"type": "text", "text": "First block"}])
+        self.assertEqual(messages[1]["content"], [user_content[1]])
+
+
+class TestAssemblePromptStdin(unittest.TestCase):
+    def test_stdin_read_when_not_tty(self):
+        cfg = Config(
+            api_url="http://localhost:1234/v1",
+            api_key="",
+            model="test-model",
+            system_prompt=None,
+            files=[],
+            images=[],
+            prompt=["Hello"],
+            max_size=10 * 1024 * 1024,
+            output_json=False,
+            debug=False,
+            stream=True,
+        )
+
+        stdin_data = b"stdin content here"
+        with patch("sys.stdin", MagicMock()) as mock_stdin:
+            mock_stdin.isatty.return_value = False
+            mock_stdin.buffer.read.return_value = stdin_data
+
+            result = assemble_prompt(cfg)
+
+        # Should contain stdin attachment + prompt
+        self.assertEqual(len(result), 2)
+        self.assertIn("stdin content here", result[0]["text"])
+        self.assertIn('source="stdin"', result[0]["text"])
+        self.assertEqual(result[1]["text"], "Hello")
+
+    def test_stdin_empty_when_tty(self):
+        cfg = Config(
+            api_url="http://localhost:1234/v1",
+            api_key="",
+            model="test-model",
+            system_prompt=None,
+            files=[],
+            images=[],
+            prompt=["Hello"],
+            max_size=10 * 1024 * 1024,
+            output_json=False,
+            debug=False,
+            stream=True,
+        )
+
+        with patch("sys.stdin", MagicMock()) as mock_stdin:
+            mock_stdin.isatty.return_value = True
+
+            result = assemble_prompt(cfg)
+
+        # Should only contain prompt (no stdin attachment)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["text"], "Hello")
+
+    def test_stdin_exceeds_size_limit(self):
+        cfg = Config(
+            api_url="http://localhost:1234/v1",
+            api_key="",
+            model="test-model",
+            system_prompt=None,
+            files=[],
+            images=[],
+            prompt=["Hello"],
+            max_size=5,  # Very small limit for testing
+            output_json=False,
+            debug=False,
+            stream=True,
+        )
+
+        stdin_data = b"this is way too long"
+        with patch("sys.stdin", MagicMock()) as mock_stdin:
+            mock_stdin.isatty.return_value = False
+            mock_stdin.buffer.read.return_value = stdin_data
+
+            with self.assertRaises(SystemExit):
+                assemble_prompt(cfg)
+
+
+class TestTryApiCallErrors(unittest.TestCase):
+    def test_http_error(self):
+        from urllib.error import HTTPError
+
+        req_mock = MagicMock()
+        req_mock.add_header = MagicMock()
+
+        http_err = HTTPError(
+            "http://example.com", 401, "Unauthorized", {}, BytesIO(b'{"error": "invalid key"}')
+        )
+
+        with patch("lq.urllib.request.Request", return_value=req_mock):
+            with patch("lq.urllib.request.urlopen", side_effect=http_err):
+                with self.assertRaises(SystemExit):
+                    _try_api_call(
+                        endpoint="http://example.com/chat/completions",
+                        payload=b'{"model": "test"}',
+                        auth_header="Bearer test-key",
+                        debug=False,
+                        output_json=False,
+                        stream=False,
+                    )
+
+    def test_url_error(self):
+        from urllib.error import URLError
+
+        req_mock = MagicMock()
+        req_mock.add_header = MagicMock()
+
+        url_err = URLError("Connection refused")
+
+        with patch("lq.urllib.request.Request", return_value=req_mock):
+            with patch("lq.urllib.request.urlopen", side_effect=url_err):
+                with self.assertRaises(SystemExit):
+                    _try_api_call(
+                        endpoint="http://example.com/chat/completions",
+                        payload=b'{"model": "test"}',
+                        auth_header=None,
+                        debug=False,
+                        output_json=False,
+                        stream=False,
+                    )
+
+    def test_no_choices_in_response(self):
+        req_mock = MagicMock()
+        req_mock.add_header = MagicMock()
+
+        class MockResp:
+            def __enter__(self):
+                return self
+            def __exit__(self, exc_type, exc_val, exc_tb):
+                pass
+            def read(self):
+                return json.dumps({"choices": []}).encode()
+
+        with patch("lq.urllib.request.Request", return_value=req_mock):
+            with patch("lq.urllib.request.urlopen", return_value=MockResp()):
+                with self.assertRaises(SystemExit):
+                    _try_api_call(
+                        endpoint="http://example.com/chat/completions",
+                        payload=b'{"model": "test"}',
+                        auth_header=None,
+                        debug=False,
+                        output_json=False,
+                        stream=False,
+                    )
+
+    def test_debug_mode_no_crash(self):
+        req_mock = MagicMock()
+        req_mock.add_header = MagicMock()
+
+        class MockResp:
+            def __enter__(self):
+                return self
+            def __exit__(self, exc_type, exc_val, exc_tb):
+                pass
+            def read(self):
+                return json.dumps({
+                    "choices": [{"message": {"content": "test response"}}]
+                }).encode()
+
+        with patch("lq.urllib.request.Request", return_value=req_mock):
+            with patch("lq.urllib.request.urlopen", return_value=MockResp()):
+                _try_api_call(
+                    endpoint="http://example.com/chat/completions",
+                    payload=b'{"model": "test"}',
+                    auth_header="Bearer test-key",
+                    debug=True,
+                    output_json=False,
+                    stream=False,
+                )
 
 
 if __name__ == "__main__":
