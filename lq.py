@@ -11,6 +11,11 @@ import base64
 import urllib.request
 import urllib.error
 import stat
+import readline as _readline
+try:
+    import readline  # noqa: F811
+except ImportError:
+    readline = None  # type: ignore[assignment]
 from dataclasses import dataclass, field
 from typing import List, Optional, Dict, Any, Union
 import copy
@@ -687,6 +692,9 @@ def main():
                 continue
             elif not user_input:
                 continue
+            
+            if readline is not None and user_input:
+                readline.add_history(user_input)
             
             # Combine deferred attachments with first user input if needed
             user_content = [{"type": "text", "text": user_input}]
