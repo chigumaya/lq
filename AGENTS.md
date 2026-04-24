@@ -5,4 +5,4 @@
 - python
 - 標準モジュールだけで動くように
 - 本体: lq.py
-- テスト: test_lq.py
+- テスト: `python3 test_lq.py`, `sh test_lq.sh`

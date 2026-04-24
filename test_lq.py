@@ -270,24 +270,24 @@ class TestBuildPayloadWithChatSession(unittest.TestCase):
             debug=False,
             stream=True,
         )
-        
-        session = ChatSession(system_prompt=cfg.system_prompt)
-        session.add_user_message("Previous message")
+
+        session = ChatSession()
+        session.add_user_message([{"type": "text", "text": "Previous message"}])
         session.add_assistant_message("Previous response")
-        
+
         user_content = [{"type": "text", "text": "New message"}]
         payload_bytes = build_payload(cfg, user_content, session)
         payload = json.loads(payload_bytes)
-        
+
         self.assertEqual(payload["model"], "test-model")
         self.assertTrue(payload["stream"])
-        
+
         messages = payload["messages"]
         self.assertEqual(len(messages), 4)  # system + previous user + previous assistant + new user
         self.assertEqual(messages[0]["role"], "system")
         self.assertEqual(messages[0]["content"], "You are helpful.")
         self.assertEqual(messages[1]["role"], "user")
-        self.assertEqual(messages[1]["content"], "Previous message")
+        self.assertEqual(messages[1]["content"], [{"type": "text", "text": "Previous message"}])
         self.assertEqual(messages[2]["role"], "assistant")
         self.assertEqual(messages[2]["content"], "Previous response")
         self.assertEqual(messages[3]["role"], "user")
@@ -307,8 +307,9 @@ class TestBuildPayloadWithChatSession(unittest.TestCase):
             debug=False,
             stream=True,
         )
+        session = ChatSession()
         user_content = [{"type": "text", "text": "Hello"}]
-        payload_bytes = build_payload(cfg, user_content)
+        payload_bytes = build_payload(cfg, user_content, session)
         payload = json.loads(payload_bytes)
 
         self.assertEqual(payload["model"], "test-model")
@@ -334,8 +335,9 @@ class TestBuildPayloadWithChatSession(unittest.TestCase):
             debug=False,
             stream=True,
         )
+        session = ChatSession()
         user_content = [{"type": "text", "text": "Hello"}]
-        payload_bytes = build_payload(cfg, user_content)
+        payload_bytes = build_payload(cfg, user_content, session)
         payload = json.loads(payload_bytes)
 
         self.assertEqual(len(payload["messages"]), 1)
@@ -355,8 +357,9 @@ class TestBuildPayloadWithChatSession(unittest.TestCase):
             debug=False,
             stream=False,
         )
+        session = ChatSession()
         user_content = [{"type": "text", "text": "Hello"}]
-        payload_bytes = build_payload(cfg, user_content)
+        payload_bytes = build_payload(cfg, user_content, session)
         payload = json.loads(payload_bytes)
 
         self.assertFalse(payload["stream"])
@@ -375,11 +378,12 @@ class TestBuildPayloadWithChatSession(unittest.TestCase):
             debug=False,
             stream=True,
         )
+        session = ChatSession()
         user_content = [
             {"type": "text", "text": "First block"},
             {"type": "image_url", "image_url": {"url": "data:image/png;base64,abc"}},
         ]
-        payload_bytes = build_payload(cfg, user_content)
+        payload_bytes = build_payload(cfg, user_content, session)
         payload = json.loads(payload_bytes)
 
         messages = payload["messages"]
@@ -561,60 +565,59 @@ class TestTryApiCallErrors(unittest.TestCase):
 
 class TestChatSession(unittest.TestCase):
     def test_initialization(self):
-        session = ChatSession(system_prompt="You are helpful.")
-        self.assertEqual(session.system_prompt, "You are helpful.")
+        session = ChatSession()
         self.assertEqual(session.history, [])
 
     def test_add_user_message(self):
-        session = ChatSession(system_prompt="")
-        session.add_user_message("Hello")
+        session = ChatSession()
+        session.add_user_message([{"type": "text", "text": "Hello"}])
         self.assertEqual(len(session.history), 1)
         self.assertEqual(session.history[0]["role"], "user")
-        self.assertEqual(session.history[0]["content"], "Hello")
+        self.assertEqual(session.history[0]["content"], [{"type": "text", "text": "Hello"}])
 
     def test_add_assistant_message(self):
-        session = ChatSession(system_prompt="")
+        session = ChatSession()
         session.add_assistant_message("Hi there!")
         self.assertEqual(len(session.history), 1)
         self.assertEqual(session.history[0]["role"], "assistant")
         self.assertEqual(session.history[0]["content"], "Hi there!")
 
     def test_get_messages_with_system_prompt(self):
-        session = ChatSession(system_prompt="You are helpful.")
-        session.add_user_message("Hello")
+        session = ChatSession()
+        session.add_user_message([{"type": "text", "text": "Hello"}])
         session.add_assistant_message("Hi there!")
-        
-        messages = session.get_messages()
+
+        messages = session.get_messages("You are helpful.")
         self.assertEqual(len(messages), 3)
         self.assertEqual(messages[0]["role"], "system")
         self.assertEqual(messages[0]["content"], "You are helpful.")
         self.assertEqual(messages[1]["role"], "user")
-        self.assertEqual(messages[1]["content"], "Hello")
+        self.assertEqual(messages[1]["content"], [{"type": "text", "text": "Hello"}])
         self.assertEqual(messages[2]["role"], "assistant")
         self.assertEqual(messages[2]["content"], "Hi there!")
 
     def test_get_messages_without_system_prompt(self):
-        session = ChatSession(system_prompt="")
-        session.add_user_message("Hello")
-        
-        messages = session.get_messages()
+        session = ChatSession()
+        session.add_user_message([{"type": "text", "text": "Hello"}])
+
+        messages = session.get_messages("")
         self.assertEqual(len(messages), 1)
         self.assertEqual(messages[0]["role"], "user")
-        self.assertEqual(messages[0]["content"], "Hello")
+        self.assertEqual(messages[0]["content"], [{"type": "text", "text": "Hello"}])
 
     def test_add_user_message_with_attachments(self):
-        session = ChatSession(system_prompt="")
-        session.add_user_message("What's in this file?", attachments=["file:README.md", "image:screenshot.png"])
+        session = ChatSession()
+        content = [{"type": "text", "text": "What's in this file?"}]
+        content[0]["text"] += "\n\n[Attachments: file:README.md, image:screenshot.png]"
+        session.add_user_message(content)
         self.assertEqual(len(session.history), 1)
         self.assertEqual(session.history[0]["role"], "user")
-        self.assertIn("[Attachments:", session.history[0]["content"])
-        self.assertIn("file:README.md", session.history[0]["content"])
-        self.assertIn("image:screenshot.png", session.history[0]["content"])
+        self.assertIn("[Attachments:", session.history[0]["content"][0]["text"])
 
     def test_add_user_message_without_attachments(self):
-        session = ChatSession(system_prompt="")
-        session.add_user_message("Hello", attachments=None)
-        self.assertEqual(session.history[0]["content"], "Hello")
+        session = ChatSession()
+        session.add_user_message([{"type": "text", "text": "Hello"}])
+        self.assertEqual(session.history[0]["content"], [{"type": "text", "text": "Hello"}])
 
 
 if __name__ == "__main__":

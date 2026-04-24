@@ -34,22 +34,18 @@ class Config:
 @dataclass
 class ChatSession:
     """Manages conversation history for chat mode."""
-    system_prompt: str
     history: List[Dict[str, Any]] = field(default_factory=list)
 
-    def add_user_message(self, text: str, attachments: Optional[List[str]] = None) -> None:
-        if attachments:
-            self.history.append({"role": "user", "content": f"{text}\n\n[Attachments: {', '.join(attachments)}]"})
-        else:
-            self.history.append({"role": "user", "content": text})
+    def add_user_message(self, content_items: List[Dict[str, Any]]) -> None:
+        self.history.append({"role": "user", "content": content_items})
 
     def add_assistant_message(self, text: str) -> None:
         self.history.append({"role": "assistant", "content": text})
 
-    def get_messages(self) -> List[Dict[str, Any]]:
+    def get_messages(self, system_prompt: str) -> List[Dict[str, Any]]:
         messages = []
-        if self.system_prompt:
-            messages.append({"role": "system", "content": self.system_prompt})
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
         messages.extend(self.history)
         return messages
 
@@ -522,26 +518,12 @@ def assemble_prompt(cfg: Config, read_stdin: bool = True) -> List[Dict[str, Any]
     
     return content
 
-def build_payload(cfg: Config, user_content: List[Dict[str, Any]], session: Optional[ChatSession] = None) -> bytes:
+def build_payload(cfg: Config, user_content: List[Dict[str, Any]], session: ChatSession) -> bytes:
     """Build API request payload using content arrays only."""
-    if session is not None:
-        # For chat mode, use session messages and append new user content as a single message
-        messages = session.get_messages()
-        # Combine all content items into a single user message
-        combined_content = []
-        for item in user_content:
-            combined_content.append(item)
-        messages.append({"role": "user", "content": combined_content})
-    else:
-        # Legacy mode: build messages from scratch
-        messages = []
-        if cfg.system_prompt:
-            messages.append({"role": "system", "content": cfg.system_prompt})
+    messages = session.get_messages(cfg.system_prompt)
+    for item in user_content:
+        messages.append({"role": "user", "content": [item]})
 
-        # Role separation: each content block gets its own user message.
-        for item in user_content:
-            messages.append({"role": "user", "content": [item]})
-    
     payload = {
         "model": cfg.model,
         "messages": messages,
@@ -664,42 +646,40 @@ def _handle_streaming(resp, debug: bool, output_json: bool) -> str:
     
     return "".join(chunks)
 
-def run_chat_mode(cfg: Config, initial_user_content: Optional[List[Dict[str, Any]]] = None) -> None:
-    """Run interactive chat mode."""
-    session = ChatSession(system_prompt=cfg.system_prompt)
+def main():
+    args = parse_args()
+    cfg = load_config(args)
     
-    # If there's an explicit prompt (with files/images), send it immediately
-    if initial_user_content is not None:
-        payload = build_payload(cfg, initial_user_content, session)
-        response = call_api(cfg, payload)
-        if response:
-            if cfg.stream:
-                sys.stdout.write("\n")
-                sys.stdout.flush()
-            else:
-                print(response)
-        
-        # Collect attachment info for session history
-        attachment_info = []
-        if cfg.files or cfg.images:
-            for f in cfg.files:
-                attachment_info.append(f"file:{os.path.basename(f)}")
-            for img in cfg.images:
-                attachment_info.append(f"image:{os.path.basename(img)}")
-        
-        prompt_text = ' '.join(cfg.prompt)
-        if attachment_info:
-            session.add_user_message(prompt_text, attachments=attachment_info)
+    # --json is incompatible with interactive chat mode; ignore it when both are set
+    if args.chat:
+        cfg.output_json = False
+    
+    session = ChatSession()
+    user_content = assemble_prompt(cfg)
+    payload = build_payload(cfg, user_content, session)
+    response = call_api(cfg, payload)
+    
+    # Output response
+    if response:
+        if cfg.stream:
+            sys.stdout.write("\n")
+            sys.stdout.flush()
         else:
-            session.add_user_message(prompt_text)
+            print(response)
         session.add_assistant_message(response)
     
-    # Interactive loop - defer attachments until first user input in chat mode
+    # Exit if not in interactive chat mode
+    if args.chat and (not sys.stdout.isatty() or not sys.stdin.isatty()):
+        sys.stderr.write("Warning: --chat requires a TTY. Running as one-shot mode.\n")
+        return
+    if not args.chat:
+        return
+    
+    # Interactive loop - handle deferred attachments with first user input
     while True:
         try:
             user_input = input("\033[1mprompt> \033[0m").strip()
             
-            # Handle special commands
             if user_input in ["/quit", "/exit"]:
                 break
             elif user_input.startswith("/"):
@@ -710,28 +690,15 @@ def run_chat_mode(cfg: Config, initial_user_content: Optional[List[Dict[str, Any
             
             # Combine deferred attachments with first user input if needed
             user_content = [{"type": "text", "text": user_input}]
-            attachment_info = []
-            if initial_user_content is None and (cfg.files or cfg.images):
+            if cfg.files or cfg.images:
                 temp_cfg = copy.copy(cfg)
                 temp_cfg.prompt = [user_input]
                 for item in assemble_prompt(temp_cfg, read_stdin=False):
                     # Only skip the prompt-text entry added by assemble_prompt
                     if not (item.get("type") == "text" and item.get("text") == user_input):
                         user_content.append(item)
-                        # Collect attachment info for session history
-                        if item.get("type") == "text":
-                            text = item["text"]
-                            m = re.search(r'source="([^"]+)"', text)
-                            if m:
-                                name = re.search(r'name="([^"]*)"', text)
-                                attachment_info.append(f"{m.group(1)}:{name.group(1) if name else ''}")
             
-            # Store session history with attachment context
-            if attachment_info:
-                session.add_user_message(user_input, attachments=attachment_info)
-            else:
-                session.add_user_message(user_input)
-            
+            session.add_user_message(user_content)
             payload = build_payload(cfg, user_content, session)
             response = call_api(cfg, payload)
             
@@ -741,7 +708,6 @@ def run_chat_mode(cfg: Config, initial_user_content: Optional[List[Dict[str, Any
                     sys.stdout.flush()
                 else:
                     print(response)
-                session.add_user_message(user_input)
                 session.add_assistant_message(response)
                 
         except KeyboardInterrupt:
@@ -750,32 +716,6 @@ def run_chat_mode(cfg: Config, initial_user_content: Optional[List[Dict[str, Any
         except EOFError:
             print("\nExiting chat mode.")
             break
-
-
-def main():
-    args = parse_args()
-    cfg = load_config(args)
-    
-    # --json is incompatible with interactive chat mode; ignore it when both are set
-    if args.chat:
-        cfg.output_json = False
-    
-    if args.chat and sys.stdout.isatty() and sys.stdin.isatty():
-        # Chat mode - only send initial content when there's an explicit prompt
-        initial_user_content = None
-        if cfg.prompt:
-            initial_user_content = assemble_prompt(cfg)
-        run_chat_mode(cfg, initial_user_content)
-    else:
-        # Legacy mode
-        user_content = assemble_prompt(cfg)
-        payload = build_payload(cfg, user_content)
-        response = call_api(cfg, payload)
-        if not cfg.stream:
-            print(response)
-        else:
-            sys.stdout.write("\n")
-            sys.stdout.flush()
 
 if __name__ == "__main__":
     main()
