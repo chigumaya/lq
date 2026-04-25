@@ -523,11 +523,9 @@ def assemble_prompt(cfg: Config, read_stdin: bool = True) -> List[Dict[str, Any]
     
     return content
 
-def build_payload(cfg: Config, user_content: List[Dict[str, Any]], session: ChatSession) -> bytes:
+def build_payload(cfg: Config, session: ChatSession) -> bytes:
     """Build API request payload using content arrays only."""
     messages = session.get_messages(cfg.system_prompt)
-    for item in user_content:
-        messages.append({"role": "user", "content": [item]})
 
     payload = {
         "model": cfg.model,
@@ -661,7 +659,10 @@ def main():
     
     session = ChatSession()
     user_content = assemble_prompt(cfg)
-    payload = build_payload(cfg, user_content, session)
+    session.add_user_message(user_content)
+    cfg.files.clear()
+    cfg.images.clear()
+    payload = build_payload(cfg, session)
     response = call_api(cfg, payload)
     
     # Output response
@@ -707,7 +708,7 @@ def main():
                         user_content.append(item)
             
             session.add_user_message(user_content)
-            payload = build_payload(cfg, user_content, session)
+            payload = build_payload(cfg, session)
             response = call_api(cfg, payload)
             
             if response:

@@ -276,7 +276,8 @@ class TestBuildPayloadWithChatSession(unittest.TestCase):
         session.add_assistant_message("Previous response")
 
         user_content = [{"type": "text", "text": "New message"}]
-        payload_bytes = build_payload(cfg, user_content, session)
+        session.add_user_message(user_content)
+        payload_bytes = build_payload(cfg, session)
         payload = json.loads(payload_bytes)
 
         self.assertEqual(payload["model"], "test-model")
@@ -309,7 +310,8 @@ class TestBuildPayloadWithChatSession(unittest.TestCase):
         )
         session = ChatSession()
         user_content = [{"type": "text", "text": "Hello"}]
-        payload_bytes = build_payload(cfg, user_content, session)
+        session.add_user_message(user_content)
+        payload_bytes = build_payload(cfg, session)
         payload = json.loads(payload_bytes)
 
         self.assertEqual(payload["model"], "test-model")
@@ -337,7 +339,8 @@ class TestBuildPayloadWithChatSession(unittest.TestCase):
         )
         session = ChatSession()
         user_content = [{"type": "text", "text": "Hello"}]
-        payload_bytes = build_payload(cfg, user_content, session)
+        session.add_user_message(user_content)
+        payload_bytes = build_payload(cfg, session)
         payload = json.loads(payload_bytes)
 
         self.assertEqual(len(payload["messages"]), 1)
@@ -359,7 +362,8 @@ class TestBuildPayloadWithChatSession(unittest.TestCase):
         )
         session = ChatSession()
         user_content = [{"type": "text", "text": "Hello"}]
-        payload_bytes = build_payload(cfg, user_content, session)
+        session.add_user_message(user_content)
+        payload_bytes = build_payload(cfg, session)
         payload = json.loads(payload_bytes)
 
         self.assertFalse(payload["stream"])
@@ -383,14 +387,13 @@ class TestBuildPayloadWithChatSession(unittest.TestCase):
             {"type": "text", "text": "First block"},
             {"type": "image_url", "image_url": {"url": "data:image/png;base64,abc"}},
         ]
-        payload_bytes = build_payload(cfg, user_content, session)
+        session.add_user_message(user_content)
+        payload_bytes = build_payload(cfg, session)
         payload = json.loads(payload_bytes)
 
         messages = payload["messages"]
-        self.assertEqual(len(messages), 2)
-        # Each content block gets its own message
-        self.assertEqual(messages[0]["content"], [{"type": "text", "text": "First block"}])
-        self.assertEqual(messages[1]["content"], [user_content[1]])
+        self.assertEqual(len(messages), 1)
+        self.assertEqual(messages[0]["content"], user_content)
 
 
 class TestAssemblePromptStdin(unittest.TestCase):
