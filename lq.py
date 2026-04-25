@@ -658,21 +658,46 @@ def main():
         cfg.output_json = False
     
     session = ChatSession()
-    user_content = assemble_prompt(cfg)
-    session.add_user_message(user_content)
+    
+    # Add file/image attachments to session regardless of prompt availability
+    if cfg.files or cfg.images:
+        content: List[Dict[str, Any]] = []
+        max_size = cfg.max_size
+        for fpath in cfg.files:
+            data = read_path_bytes(fpath, max_size)
+            text_obj = _process_attachment_data(data, "file", os.path.basename(fpath))
+            content.append({"type": "text", "text": text_obj})
+        for ipath in cfg.images:
+            image_data = read_path_bytes(ipath, max_size)
+            mime_type = get_image_mime_type(ipath, image_data)
+            base64_data = bytes_to_base64(image_data)
+            content.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:{mime_type};base64,{base64_data}"}
+            })
+        session.add_user_message(content)
+    
     cfg.files.clear()
     cfg.images.clear()
-    payload = build_payload(cfg, session)
-    response = call_api(cfg, payload)
     
-    # Output response
-    if response:
-        if cfg.stream:
-            sys.stdout.write("\n")
-            sys.stdout.flush()
-        else:
-            print(response)
-        session.add_assistant_message(response)
+    has_initial_prompt = bool(cfg.prompt)
+    if not has_initial_prompt and not args.chat:
+        error("No prompt provided.")
+    
+    if has_initial_prompt:
+        user_content = assemble_prompt(cfg)
+        session.add_user_message(user_content)
+        payload = build_payload(cfg, session)
+        response = call_api(cfg, payload)
+        
+        # Output response
+        if response:
+            if cfg.stream:
+                sys.stdout.write("\n")
+                sys.stdout.flush()
+            else:
+                print(response)
+            session.add_assistant_message(response)
     
     # Exit if not in interactive chat mode
     if args.chat and (not sys.stdout.isatty() or not sys.stdin.isatty()):
