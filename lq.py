@@ -11,7 +11,6 @@ import base64
 import urllib.request
 import urllib.error
 import stat
-import readline as _readline
 try:
     import readline  # noqa: F811
 except ImportError:
@@ -656,6 +655,10 @@ def main():
     # --json is incompatible with interactive chat mode; ignore it when both are set
     if args.chat:
         cfg.output_json = False
+
+    chat_without_tty = args.chat and (not sys.stdout.isatty() or not sys.stdin.isatty())
+    if chat_without_tty:
+        sys.stderr.write("Warning: --chat requires a TTY. Running as one-shot mode.\n")
     
     session = ChatSession()
     
@@ -681,9 +684,9 @@ def main():
     cfg.images.clear()
     
     has_initial_prompt = bool(cfg.prompt)
-    if not has_initial_prompt and not args.chat:
+    if not has_initial_prompt and (not args.chat or chat_without_tty):
         error("No prompt provided.")
-    
+
     if has_initial_prompt:
         user_content = assemble_prompt(cfg)
         session.add_user_message(user_content)
@@ -699,11 +702,9 @@ def main():
                 print(response)
             session.add_assistant_message(response)
     
-    # Exit if not in interactive chat mode
-    if args.chat and (not sys.stdout.isatty() or not sys.stdin.isatty()):
-        sys.stderr.write("Warning: --chat requires a TTY. Running as one-shot mode.\n")
-        return
     if not args.chat:
+        return
+    if chat_without_tty:
         return
     
     # Interactive loop - handle deferred attachments with first user input
