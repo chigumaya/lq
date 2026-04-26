@@ -21,16 +21,20 @@ import urllib.error
 import urllib.request
 
 
-def pick_response(text):
-    if 'source="file"' in text or 'source="stdin"' in text:
+def pick_response(latest_user, assistant_text):
+    if "first turn" in latest_user:
+        return "first reply"
+    if "followup" in latest_user:
+        return "saw first reply" if "first reply" in assistant_text else "followup"
+    if 'source="file"' in latest_user or 'source="stdin"' in latest_user:
         return "json"
-    if "what letter?" in text:
+    if "what letter?" in latest_user:
         return "A"
-    if "good morning" in text:
+    if "good morning" in latest_user:
         return "good morning"
-    if "hello" in text and "times" in text:
+    if "hello" in latest_user and "times" in latest_user:
         return "hello hello hello"
-    if "hello" in text:
+    if "hello" in latest_user:
         return "hello"
     return "ok"
 
@@ -61,11 +65,11 @@ def urlopen(req, timeout=120):
     else:
         payload = {}
 
-    parts = []
-    for message in payload.get("messages", []):
-        if message.get("role") != "user":
-            continue
-        content = message.get("content")
+    messages = payload.get("messages", [])
+    current_user_parts = []
+    assistant_parts = []
+
+    def extend_parts(parts, content):
         if isinstance(content, str):
             parts.append(content)
         elif isinstance(content, list):
@@ -75,13 +79,34 @@ def urlopen(req, timeout=120):
                 elif item.get("type") == "image_url":
                     parts.append("[image]")
 
+    started = False
+    saw_assistant = False
+    for message in reversed(messages):
+        role = message.get("role")
+        content = message.get("content")
+        if not started:
+            if role == "user":
+                started = True
+                extend_parts(current_user_parts, content)
+            continue
+        if role == "assistant":
+            saw_assistant = True
+            extend_parts(assistant_parts, content)
+            continue
+        if role == "user":
+            if saw_assistant:
+                break
+            extend_parts(current_user_parts, content)
+            continue
+        break
+
     response = {
         "object": "chat.completion",
         "choices": [
             {
                 "message": {
                     "role": "assistant",
-                    "content": pick_response("\n".join(parts)),
+                    "content": pick_response("\n".join(reversed(current_user_parts)), "\n".join(assistant_parts)),
                 }
             }
         ],
@@ -164,6 +189,39 @@ T "template with too many params" 1 '$lq -t t1 foo bar'
 T "template with too few params" 1 '$lq -t t2'
 T "chat without tty" 1 '$lq --chat < $test_config'
 T "ignore chat" 0 '$lq --chat "what type is this file?" < $test_config 2>&1 | grep Warning'
+
+cat > "$mock_dir/chat.exp" <<EOF
+#!/usr/bin/expect -f
+set timeout 10
+log_user 0
+spawn sh -c "$lq --chat --no-stream"
+expect {
+  -re {prompt> } {}
+  timeout { exit 1 }
+}
+send -- "first turn\r"
+expect {
+  -re {first reply} {}
+  timeout { exit 1 }
+}
+expect {
+  -re {prompt> } {}
+  timeout { exit 1 }
+}
+send -- "followup\r"
+expect {
+  -re {saw first reply} {}
+  timeout { exit 1 }
+}
+expect {
+  -re {prompt> } {}
+  timeout { exit 1 }
+}
+send -- "/quit\r"
+expect eof
+EOF
+chmod +x "$mock_dir/chat.exp"
+T "chat interactive" 0 "/usr/bin/expect $mock_dir/chat.exp"
 
 chmod 644 "$test_config"
 T "config permission" 0 '$lq say hello </dev/null 2>&1 | grep Warning'
