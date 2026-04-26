@@ -3,14 +3,19 @@
 """
 
 import argparse
+import glob
 import os
 import sys
 import re
 import json
+import shlex
 import base64
+import locale
 import urllib.request
 import urllib.error
 import stat
+import shutil
+import unicodedata
 try:
     import readline  # noqa: F811
 except ImportError:
@@ -20,6 +25,15 @@ from typing import List, Optional, Dict, Any, Union
 import copy
 
 VERSION = "0.1"
+
+def _is_cjk_locale() -> bool:
+    """Return True when the active locale is likely to render ambiguous-width chars as wide."""
+    try:
+        lang = locale.getlocale(locale.LC_CTYPE)[0] or ""
+    except (ValueError, TypeError):
+        lang = ""
+    lang = lang.lower()
+    return lang.startswith(("ja", "zh", "ko"))
 
 @dataclass
 class Config:
@@ -31,6 +45,7 @@ class Config:
     images: List[str]
     prompt: List[str]
     max_size: int  # Maximum size for file/stdin reads in bytes
+    templates: Dict[str, tuple] = field(default_factory=dict)
     output_json: bool = False
     debug: bool = False
     stream: bool = True
@@ -238,6 +253,7 @@ def load_config(args: argparse.Namespace) -> Config:
         images=args.images or [],
         prompt=prompt_args if resolved_prompt is None else [resolved_prompt],
         max_size=max_size,
+        templates=templates,
         output_json=args.output_json,
         debug=args.debug,
         stream=args.stream and not args.output_json and sys.stdout.isatty()
@@ -522,6 +538,335 @@ def assemble_prompt(cfg: Config, read_stdin: bool = True) -> List[Dict[str, Any]
     
     return content
 
+def _char_display_width(ch: str) -> int:
+    """Return the terminal display width for a single Unicode character."""
+    if not ch:
+        return 0
+    if unicodedata.combining(ch):
+        return 0
+    if unicodedata.category(ch) in {"Mn", "Me", "Cf"}:
+        return 0
+    if unicodedata.east_asian_width(ch) in {"W", "F"}:
+        return 2
+    if unicodedata.east_asian_width(ch) == "A" and _is_cjk_locale():
+        return 2
+    return 1
+
+def _text_display_width(text: str) -> int:
+    """Return the terminal display width for a Unicode string."""
+    return sum(_char_display_width(ch) for ch in text)
+
+def _chat_available_commands() -> str:
+    return "Available commands: /quit, /exit, /template NAME [PARAMS], /file FILENAME, /image FILENAME"
+
+CHAT_COMMANDS = ["/quit", "/exit", "/template", "/file", "/image"]
+
+def _longest_common_prefix(values: List[str]) -> str:
+    """Return the longest common prefix for a list of strings."""
+    if not values:
+        return ""
+    prefix = values[0]
+    for value in values[1:]:
+        while not value.startswith(prefix) and prefix:
+            prefix = prefix[:-1]
+        if not prefix:
+            break
+    return prefix
+
+def _file_completion_candidates(prefix: str) -> List[str]:
+    """Return completion candidates for a filename prefix."""
+    if not prefix:
+        matches = glob.glob("*")
+    else:
+        matches = glob.glob(prefix + "*")
+    candidates: List[str] = []
+    for match in sorted(matches):
+        if os.path.isdir(match):
+            candidates.append(match + os.sep)
+        else:
+            candidates.append(match)
+    return candidates
+
+def _chat_completion_candidates(line: str, cursor: int, cfg: Config) -> List[str]:
+    """Return completion candidates for the current chat input context."""
+    before = line[:cursor]
+    if not before:
+        return CHAT_COMMANDS
+
+    if before.startswith("/"):
+        if " " not in before:
+            return [cmd + " " for cmd in CHAT_COMMANDS if cmd.startswith(before)]
+
+        command, rest = before.split(" ", 1)
+        if command == "/template":
+            if before.endswith(" "):
+                prefix = ""
+            else:
+                prefix = rest.split()[-1] if rest.split() else ""
+            return [name + " " for name in sorted(cfg.templates) if name.startswith(prefix)]
+        if command in ("/file", "/image"):
+            if before.endswith(" "):
+                prefix = ""
+            else:
+                prefix = rest.split()[-1] if rest.split() else ""
+            return _file_completion_candidates(prefix)
+
+        return []
+
+    return []
+
+def _complete_chat_input(line: str, cursor: int, cfg: Config) -> Optional[tuple]:
+    """Apply a single completion step to chat input."""
+    candidates = _chat_completion_candidates(line, cursor, cfg)
+    if not candidates:
+        return None
+
+    before = line[:cursor]
+    if before.startswith("/") and " " not in before:
+        prefix = before
+        completed = candidates[0]
+        if len(candidates) > 1:
+            common = _longest_common_prefix(candidates)
+            if len(common) > len(prefix):
+                completed = common
+        new_line = completed + line[cursor:]
+        return new_line, len(completed)
+
+    if before.startswith("/"):
+        token_start = before.rfind(" ") + 1
+        token_prefix = before[token_start:]
+        completed = candidates[0]
+        if len(candidates) > 1:
+            common = _longest_common_prefix(candidates)
+            if len(common) > len(token_prefix):
+                completed = common
+        new_line = line[:token_start] + completed + line[cursor:]
+        return new_line, token_start + len(completed)
+
+    return None
+
+def _readline_completer_factory(cfg: Config):
+    """Create a readline completer bound to the current config."""
+    if readline is None:
+        return None
+
+    def completer(text: str, state: int) -> Optional[str]:
+        try:
+            line = readline.get_line_buffer()
+            endidx = readline.get_endidx() if hasattr(readline, "get_endidx") else len(line)
+        except Exception:
+            line = text
+            endidx = len(text)
+
+        candidates = _chat_completion_candidates(line, endidx, cfg)
+        if not candidates:
+            return None
+
+        if line.startswith("/") and " " not in line[:endidx]:
+            prefix = line[:endidx]
+            filtered = [cand for cand in candidates if cand.startswith(prefix)]
+        else:
+            token_start = line[:endidx].rfind(" ") + 1
+            prefix = line[token_start:endidx]
+            filtered = [cand for cand in candidates if cand.startswith(prefix)]
+
+        if state < len(filtered):
+            return filtered[state]
+        return None
+
+    return completer
+
+def _install_readline_completion(cfg: Config) -> None:
+    """Install readline completion for chat mode."""
+    if readline is None:
+        return
+    try:
+        readline.set_completer(_readline_completer_factory(cfg))
+        # GNU readline and libedit use different key-binding syntaxes.
+        # Try both so Tab completion works on macOS and Linux.
+        for binding in ("tab: complete", "bind ^I rl_complete"):
+            try:
+                readline.parse_and_bind(binding)
+            except Exception:
+                pass
+        readline.set_completer_delims(" \t\n")
+    except Exception:
+        pass
+
+def _read_chat_input(prompt_text: str, cfg: Config, prefill: Optional[str] = None) -> str:
+    """Read a chat line, optionally prefilled via readline."""
+    if not prefill:
+        return input(prompt_text)
+
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        return input(prompt_text)
+
+    try:
+        import codecs
+        import termios
+        import tty
+    except ImportError:
+        return input(prompt_text)
+
+    fd = sys.stdin.fileno()
+    old_settings = termios.tcgetattr(fd)
+    decoder = codecs.getincrementaldecoder("utf-8")()
+    buffer = list(prefill)
+    cursor = len(buffer)
+    terminal_width = max(1, shutil.get_terminal_size(fallback=(80, 24)).columns)
+    prompt_visible = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", prompt_text)
+    prompt_width = _text_display_width(prompt_visible)
+
+    def render() -> None:
+        text = "".join(buffer)
+        cursor_width = _text_display_width("".join(buffer[:cursor]))
+        cursor_row = (prompt_width + cursor_width) // terminal_width
+        if cursor_row:
+            sys.stdout.write(f"\x1b[{cursor_row}A")
+        sys.stdout.write("\r\x1b[0J")
+        sys.stdout.write(prompt_text + text)
+        if cursor < len(buffer):
+            suffix_width = _text_display_width("".join(buffer[cursor:]))
+            if suffix_width:
+                sys.stdout.write(f"\x1b[{suffix_width}D")
+        sys.stdout.flush()
+
+    def apply_completion() -> None:
+        nonlocal buffer, cursor
+        completed = _complete_chat_input("".join(buffer), cursor, cfg)
+        if completed is None:
+            return
+        new_text, new_cursor = completed
+        buffer = list(new_text)
+        cursor = new_cursor
+
+    def read_escape_sequence() -> str:
+        first = os.read(fd, 1)
+        if not first:
+            return ""
+        second = os.read(fd, 1)
+        if not second:
+            return first.decode("ascii", errors="ignore")
+        third = b""
+        if second == b"[":
+            third = os.read(fd, 1)
+            if not third:
+                return (first + second).decode("ascii", errors="ignore")
+        return (first + second + third).decode("ascii", errors="ignore")
+
+    try:
+        tty.setraw(fd)
+        render()
+        while True:
+            chunk = os.read(fd, 1)
+            if not chunk:
+                raise EOFError
+
+            if chunk == b"\x03":
+                raise KeyboardInterrupt
+            if chunk == b"\x04":
+                if not buffer:
+                    raise EOFError
+                continue
+            if chunk in (b"\r", b"\n"):
+                sys.stdout.write("\r\n")
+                sys.stdout.flush()
+                return "".join(buffer)
+            if chunk in (b"\x7f", b"\b"):
+                if cursor > 0:
+                    del buffer[cursor - 1]
+                    cursor -= 1
+                    render()
+                continue
+            if chunk == b"\t":
+                apply_completion()
+                render()
+                continue
+            if chunk == b"\x1b":
+                seq = read_escape_sequence()
+                if seq == "[D" and cursor > 0:
+                    cursor -= 1
+                    render()
+                elif seq == "[C" and cursor < len(buffer):
+                    cursor += 1
+                    render()
+                elif seq == "[H":
+                    cursor = 0
+                    render()
+                elif seq == "[F":
+                    cursor = len(buffer)
+                    render()
+                continue
+
+            text = decoder.decode(chunk)
+            if not text:
+                continue
+            for ch in text:
+                buffer.insert(cursor, ch)
+                cursor += 1
+            render()
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+
+def _handle_chat_command(user_input: str, cfg: Config) -> Optional[str]:
+    """Handle a chat command and return a prefill string when requested."""
+    try:
+        parts = shlex.split(user_input)
+    except ValueError as e:
+        sys.stderr.write(f"Error: Invalid command syntax: {e}\n")
+        return None
+
+    if not parts:
+        return None
+
+    command = parts[0]
+    if command in ["/quit", "/exit"]:
+        return "__quit__"
+
+    if command == "/template":
+        if len(parts) < 2:
+            sys.stderr.write("Error: Usage: /template name [params]\n")
+            return None
+        template_name = parts[1]
+        template_args = parts[2:]
+        if template_name not in cfg.templates:
+            sys.stderr.write(f"Error: Template '{template_name}' not found\n")
+            return None
+        template_prompt, template_defaults = cfg.templates[template_name]
+        try:
+            return resolve_template(template_name, template_prompt, template_defaults, template_args)
+        except SystemExit:
+            return None
+
+    if command == "/file":
+        if len(parts) < 2:
+            sys.stderr.write("Error: Usage: /file filename\n")
+            return None
+        cfg.files.extend(parts[1:])
+        return None
+
+    if command == "/image":
+        if len(parts) < 2:
+            sys.stderr.write("Error: Usage: /image filename\n")
+            return None
+        cfg.images.extend(parts[1:])
+        return None
+
+    print(_chat_available_commands())
+    return None
+
+def _build_chat_user_content(cfg: Config, user_input: str) -> List[Dict[str, Any]]:
+    """Build chat user content with queued attachments before the prompt text."""
+    user_content: List[Dict[str, Any]] = []
+    if cfg.files or cfg.images:
+        temp_cfg = copy.copy(cfg)
+        temp_cfg.prompt = [user_input]
+        for item in assemble_prompt(temp_cfg, read_stdin=False):
+            if not (item.get("type") == "text" and item.get("text") == user_input):
+                user_content.append(item)
+    user_content.append({"type": "text", "text": user_input})
+    return user_content
+
 def build_payload(cfg: Config, session: ChatSession) -> bytes:
     """Build API request payload using content arrays only."""
     messages = session.get_messages(cfg.system_prompt)
@@ -661,28 +1006,7 @@ def main():
         sys.stderr.write("Warning: --chat requires a TTY. Running as one-shot mode.\n")
     
     session = ChatSession()
-    
-    # Add file/image attachments to session regardless of prompt availability
-    if cfg.files or cfg.images:
-        content: List[Dict[str, Any]] = []
-        max_size = cfg.max_size
-        for fpath in cfg.files:
-            data = read_path_bytes(fpath, max_size)
-            text_obj = _process_attachment_data(data, "file", os.path.basename(fpath))
-            content.append({"type": "text", "text": text_obj})
-        for ipath in cfg.images:
-            image_data = read_path_bytes(ipath, max_size)
-            mime_type = get_image_mime_type(ipath, image_data)
-            base64_data = bytes_to_base64(image_data)
-            content.append({
-                "type": "image_url",
-                "image_url": {"url": f"data:{mime_type};base64,{base64_data}"}
-            })
-        session.add_user_message(content)
-    
-    cfg.files.clear()
-    cfg.images.clear()
-    
+
     has_initial_prompt = bool(cfg.prompt)
     if not has_initial_prompt and (not args.chat or chat_without_tty):
         error("No prompt provided.")
@@ -692,11 +1016,14 @@ def main():
         session.add_user_message(user_content)
         payload = build_payload(cfg, session)
         response = call_api(cfg, payload)
+        if cfg.files or cfg.images:
+            cfg.files.clear()
+            cfg.images.clear()
         
         # Output response
         if response:
             if cfg.stream:
-                sys.stdout.write("\n")
+                sys.stdout.write("\r\n")
                 sys.stdout.flush()
             else:
                 print(response)
@@ -706,16 +1033,24 @@ def main():
         return
     if chat_without_tty:
         return
+
+    _install_readline_completion(cfg)
     
     # Interactive loop - handle deferred attachments with first user input
+    next_prefill: Optional[str] = None
     while True:
         try:
-            user_input = input("\033[1mprompt> \033[0m").strip()
+            user_input = _read_chat_input("\033[1mprompt> \033[0m", cfg, next_prefill).strip()
+            next_prefill = None
             
             if user_input in ["/quit", "/exit"]:
                 break
             elif user_input.startswith("/"):
-                print("Available commands: /quit, /exit")
+                result = _handle_chat_command(user_input, cfg)
+                if result == "__quit__":
+                    break
+                if result:
+                    next_prefill = result
                 continue
             elif not user_input:
                 continue
@@ -723,23 +1058,17 @@ def main():
             if readline is not None and user_input:
                 readline.add_history(user_input)
             
-            # Combine deferred attachments with first user input if needed
-            user_content = [{"type": "text", "text": user_input}]
-            if cfg.files or cfg.images:
-                temp_cfg = copy.copy(cfg)
-                temp_cfg.prompt = [user_input]
-                for item in assemble_prompt(temp_cfg, read_stdin=False):
-                    # Only skip the prompt-text entry added by assemble_prompt
-                    if not (item.get("type") == "text" and item.get("text") == user_input):
-                        user_content.append(item)
-            
+            user_content = _build_chat_user_content(cfg, user_input)
             session.add_user_message(user_content)
             payload = build_payload(cfg, session)
             response = call_api(cfg, payload)
+            if cfg.files or cfg.images:
+                cfg.files.clear()
+                cfg.images.clear()
             
             if response:
                 if cfg.stream:
-                    sys.stdout.write("\n")
+                    sys.stdout.write("\r\n")
                     sys.stdout.flush()
                 else:
                     print(response)

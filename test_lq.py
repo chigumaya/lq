@@ -11,6 +11,11 @@ from lq import (
     _process_attachment_data,
     _parse_sse_line,
     _handle_streaming,
+    _handle_chat_command,
+    _build_chat_user_content,
+    _text_display_width,
+    _chat_completion_candidates,
+    _complete_chat_input,
     resolve_template,
     load_templates,
     build_payload,
@@ -253,6 +258,143 @@ class TestLoadTemplates(unittest.TestCase):
     def test_template_defaults_must_be_array(self):
         with self.assertRaises(SystemExit):
             load_templates({"templates": [{"name": "t", "prompt": "x", "defaults": "not array"}]})
+
+
+class TestChatCommands(unittest.TestCase):
+    def _make_cfg(self):
+        return Config(
+            api_url="http://localhost:1234/v1",
+            api_key="test-key",
+            model="test-model",
+            system_prompt="You are helpful.",
+            files=[],
+            images=[],
+            prompt=[],
+            max_size=10 * 1024 * 1024,
+            templates={
+                "t1": ("say %s", ["hello"]),
+                "t2": ("say %s %s", [None, "world"]),
+            },
+            output_json=False,
+            debug=False,
+            stream=True,
+        )
+
+    def test_template_command_returns_prefill(self):
+        cfg = self._make_cfg()
+        result = _handle_chat_command('/template t1 "good morning"', cfg)
+        self.assertEqual(result, "say good morning")
+
+    def test_template_command_uses_defaults(self):
+        cfg = self._make_cfg()
+        result = _handle_chat_command("/template t1", cfg)
+        self.assertEqual(result, "say hello")
+
+    def test_file_command_queues_attachment(self):
+        cfg = self._make_cfg()
+        result = _handle_chat_command("/file foo.txt", cfg)
+        self.assertIsNone(result)
+        self.assertEqual(cfg.files, ["foo.txt"])
+
+    def test_image_command_queues_attachment(self):
+        cfg = self._make_cfg()
+        result = _handle_chat_command('/image "foo bar.png"', cfg)
+        self.assertIsNone(result)
+        self.assertEqual(cfg.images, ["foo bar.png"])
+
+    def test_queued_file_matches_one_shot_payload(self):
+        with tempfile.NamedTemporaryFile("w", delete=False, encoding="utf-8") as f:
+            f.write("hello file")
+            path = f.name
+        try:
+            one_shot_cfg = Config(
+                api_url="http://localhost:1234/v1",
+                api_key="test-key",
+                model="test-model",
+                system_prompt="You are helpful.",
+                files=[path],
+                images=[],
+                prompt=["summarize this"],
+                max_size=10 * 1024 * 1024,
+                templates={},
+                output_json=False,
+                debug=False,
+                stream=True,
+            )
+            chat_cfg = Config(
+                api_url="http://localhost:1234/v1",
+                api_key="test-key",
+                model="test-model",
+                system_prompt="You are helpful.",
+                files=[],
+                images=[],
+                prompt=[],
+                max_size=10 * 1024 * 1024,
+                templates={},
+                output_json=False,
+                debug=False,
+                stream=True,
+            )
+            _handle_chat_command(f"/file {path}", chat_cfg)
+            chat_cfg.prompt = ["summarize this"]
+
+            one_shot_content = assemble_prompt(one_shot_cfg, read_stdin=False)
+            chat_content = assemble_prompt(chat_cfg, read_stdin=False)
+            self.assertEqual(chat_content, one_shot_content)
+        finally:
+            os.unlink(path)
+
+    def test_chat_prompt_places_attachments_before_user_text(self):
+        with tempfile.NamedTemporaryFile("w", delete=False, encoding="utf-8") as f:
+            f.write("hello file")
+            path = f.name
+        try:
+            cfg = self._make_cfg()
+            _handle_chat_command(f"/file {path}", cfg)
+            content = _build_chat_user_content(cfg, "summarize this")
+            self.assertGreater(len(content), 1)
+            self.assertNotEqual(content[0]["text"], "summarize this")
+            self.assertEqual(content[-1]["text"], "summarize this")
+        finally:
+            os.unlink(path)
+
+    def test_display_width_counts_cjk_as_two_columns(self):
+        self.assertEqual(_text_display_width("abc"), 3)
+        self.assertGreater(_text_display_width("3行で要約して"), len("3行で要約して"))
+
+    def test_command_completion(self):
+        cfg = self._make_cfg()
+        self.assertIn("/file ", _chat_completion_candidates("/f", 2, cfg))
+
+    def test_template_completion(self):
+        cfg = self._make_cfg()
+        candidates = _chat_completion_candidates("/template ", 10, cfg)
+        self.assertIn("t1 ", candidates)
+
+    def test_file_completion(self):
+        cfg = self._make_cfg()
+        with tempfile.NamedTemporaryFile("w", delete=False, encoding="utf-8", suffix=".txt") as f:
+            f.write("hello")
+            path = os.path.basename(f.name)
+        try:
+            cwd = os.getcwd()
+            os.chdir(tempfile.gettempdir())
+            try:
+                candidates = _chat_completion_candidates("/file ", 6, cfg)
+                self.assertTrue(any(path in cand for cand in candidates))
+            finally:
+                os.chdir(cwd)
+        finally:
+            os.unlink(os.path.join(tempfile.gettempdir(), path))
+
+    def test_prefill_completion(self):
+        cfg = self._make_cfg()
+        result = _complete_chat_input("/f", 2, cfg)
+        self.assertIsNotNone(result)
+        if result:
+            line, cursor = result
+            self.assertEqual(line, "/file ")
+            self.assertEqual(cursor, len("/file "))
 
 
 class TestBuildPayloadWithChatSession(unittest.TestCase):

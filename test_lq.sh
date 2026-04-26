@@ -28,6 +28,8 @@ def pick_response(latest_user, assistant_text):
         return "saw first reply" if "first reply" in assistant_text else "followup"
     if 'source="file"' in latest_user or 'source="stdin"' in latest_user:
         return "json"
+    if "[image]" in latest_user and "what kind of attachment?" in latest_user:
+        return "image"
     if "what letter?" in latest_user:
         return "A"
     if "good morning" in latest_user:
@@ -199,18 +201,42 @@ expect {
   -re {prompt> } {}
   timeout { exit 1 }
 }
-send -- "first turn\r"
+send -- "/file $test_config\r"
 expect {
-  -re {first reply} {}
+  -re {prompt> } {}
+  timeout { exit 1 }
+}
+send -- "what type is this file?\r"
+expect {
+  -re {json} {}
   timeout { exit 1 }
 }
 expect {
   -re {prompt> } {}
   timeout { exit 1 }
 }
-send -- "followup\r"
+send -- "/image $test_image\r"
 expect {
-  -re {saw first reply} {}
+  -re {prompt> } {}
+  timeout { exit 1 }
+}
+send -- "what kind of attachment?\r"
+expect {
+  -re {image} {}
+  timeout { exit 1 }
+}
+expect {
+  -re {prompt> } {}
+  timeout { exit 1 }
+}
+send -- "/template t1 \"good morning\"\r"
+expect {
+  -re {prompt> } {}
+  timeout { exit 1 }
+}
+send -- "\r"
+expect {
+  -re {good morning} {}
   timeout { exit 1 }
 }
 expect {

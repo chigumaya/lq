@@ -170,6 +170,21 @@ It is also possible to define templates requiring multiple parameters:
 
 In this example, the first parameter is required, and the second parameter defaults to `"bar"` if omitted.
 
+### Chat Mode
+
+Normally, `lq` sends the prompt once and exits. If you pass `--chat`, it enters an interactive session instead.
+
+In chat mode, the following commands are available:
+
+- `/template name [params]`
+  - Expands a predefined template from the configuration file.
+- `/file filename`, `/image filename`
+  - Adds the specified file to the next user prompt in the session history.
+- `/quit`, `/exit`
+  - Leaves chat mode.
+
+If either standard input or standard output is not a TTY, `--chat` is ignored.
+
 ### Handling of Files (`-f`) and Images (`-i`)
 
 If you specify an image file using `-f` instead of `-i`, like this:
