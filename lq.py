@@ -487,8 +487,8 @@ def get_image_mime_type(path: str, data: Optional[bytes] = None) -> str:
         error(f"Unable to determine MIME type for image '{path}'")
     return mime_type
 
-def assemble_prompt(cfg: Config, read_stdin: bool = True) -> List[Dict[str, Any]]:
-    """Build content array with proper structure for injection mitigation.
+def _build_attachment_content(cfg: Config, read_stdin: bool = True) -> List[Dict[str, Any]]:
+    """Build attachment-only content blocks.
 
     Args:
         cfg: Configuration object containing files, images, prompt, etc.
@@ -522,13 +522,29 @@ def assemble_prompt(cfg: Config, read_stdin: bool = True) -> List[Dict[str, Any]
         if stdin_bytes:
             text_obj = _process_attachment_data(stdin_bytes, "stdin")
             content.append({"type": "text", "text": text_obj})
+    return content
+
+
+def assemble_prompt(cfg: Config, read_stdin: bool = True) -> List[List[Dict[str, Any]]]:
+    """Build user messages with attachments separated from the prompt text.
+
+    Returns:
+        A list of user message content arrays. Attachments, if present, are
+        emitted as an earlier user message and the prompt text is emitted as a
+        later user message.
+    """
+    messages: List[List[Dict[str, Any]]] = []
+
+    attachment_content = _build_attachment_content(cfg, read_stdin=read_stdin)
+    if attachment_content:
+        messages.append(attachment_content)
 
     # Place user prompt LAST
     has_user_prompt = bool(cfg.prompt)
     if cfg.prompt:
-        content.append({"type": "text", "text": ' '.join(cfg.prompt)})
+        messages.append([{"type": "text", "text": ' '.join(cfg.prompt)}])
     
-    if not content:
+    if not messages:
         error("No prompt provided.")
     
     # Security: require a user prompt to prevent attachment-only messages
@@ -536,7 +552,7 @@ def assemble_prompt(cfg: Config, read_stdin: bool = True) -> List[Dict[str, Any]
     if not has_user_prompt and (cfg.files or cfg.images or not sys.stdin.isatty()):
         error("A prompt is required when using files, images, or stdin. Provide at least one argument.")
     
-    return content
+    return messages
 
 def _char_display_width(ch: str) -> int:
     """Return the terminal display width for a single Unicode character."""
@@ -856,16 +872,10 @@ def _handle_chat_command(user_input: str, cfg: Config) -> Optional[str]:
     return None
 
 def _build_chat_user_content(cfg: Config, user_input: str) -> List[Dict[str, Any]]:
-    """Build chat user content with queued attachments before the prompt text."""
-    user_content: List[Dict[str, Any]] = []
-    if cfg.files or cfg.images:
-        temp_cfg = copy.copy(cfg)
-        temp_cfg.prompt = [user_input]
-        for item in assemble_prompt(temp_cfg, read_stdin=False):
-            if not (item.get("type") == "text" and item.get("text") == user_input):
-                user_content.append(item)
-    user_content.append({"type": "text", "text": user_input})
-    return user_content
+    """Build chat user messages with queued attachments before the prompt text."""
+    temp_cfg = copy.copy(cfg)
+    temp_cfg.prompt = [user_input]
+    return assemble_prompt(temp_cfg, read_stdin=False)
 
 def build_payload(cfg: Config, session: ChatSession) -> bytes:
     """Build API request payload using content arrays only."""
@@ -1012,8 +1022,8 @@ def main():
         error("No prompt provided.")
 
     if has_initial_prompt:
-        user_content = assemble_prompt(cfg)
-        session.add_user_message(user_content)
+        for user_content in assemble_prompt(cfg):
+            session.add_user_message(user_content)
         payload = build_payload(cfg, session)
         response = call_api(cfg, payload)
         if cfg.files or cfg.images:
@@ -1058,8 +1068,8 @@ def main():
             if readline is not None and user_input:
                 readline.add_history(user_input)
             
-            user_content = _build_chat_user_content(cfg, user_input)
-            session.add_user_message(user_content)
+            for user_content in _build_chat_user_content(cfg, user_input):
+                session.add_user_message(user_content)
             payload = build_payload(cfg, session)
             response = call_api(cfg, payload)
             if cfg.files or cfg.images:

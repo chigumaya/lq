@@ -351,10 +351,11 @@ class TestChatCommands(unittest.TestCase):
         try:
             cfg = self._make_cfg()
             _handle_chat_command(f"/file {path}", cfg)
-            content = _build_chat_user_content(cfg, "summarize this")
-            self.assertGreater(len(content), 1)
-            self.assertNotEqual(content[0]["text"], "summarize this")
-            self.assertEqual(content[-1]["text"], "summarize this")
+            messages = _build_chat_user_content(cfg, "summarize this")
+            self.assertEqual(len(messages), 2)
+            self.assertGreater(len(messages[0]), 0)
+            self.assertNotEqual(messages[0][0]["text"], "summarize this")
+            self.assertEqual(messages[1], [{"type": "text", "text": "summarize this"}])
         finally:
             os.unlink(path)
 
@@ -561,11 +562,11 @@ class TestAssemblePromptStdin(unittest.TestCase):
 
             result = assemble_prompt(cfg)
 
-        # Should contain stdin attachment + prompt
+        # Should contain a separate stdin attachment message and prompt message
         self.assertEqual(len(result), 2)
-        self.assertIn("stdin content here", result[0]["text"])
-        self.assertIn('source="stdin"', result[0]["text"])
-        self.assertEqual(result[1]["text"], "Hello")
+        self.assertIn("stdin content here", result[0][0]["text"])
+        self.assertIn('source="stdin"', result[0][0]["text"])
+        self.assertEqual(result[1], [{"type": "text", "text": "Hello"}])
 
     def test_stdin_empty_when_tty(self):
         cfg = Config(
@@ -587,9 +588,9 @@ class TestAssemblePromptStdin(unittest.TestCase):
 
             result = assemble_prompt(cfg)
 
-        # Should only contain prompt (no stdin attachment)
+        # Should only contain the prompt message (no stdin attachment)
         self.assertEqual(len(result), 1)
-        self.assertEqual(result[0]["text"], "Hello")
+        self.assertEqual(result[0], [{"type": "text", "text": "Hello"}])
 
     def test_stdin_exceeds_size_limit(self):
         cfg = Config(
