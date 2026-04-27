@@ -215,6 +215,8 @@ Currently, the LLM must treat attached data as part of the prompt, even if it is
 
 However, since different LLMs interpret instructions differently, and defense can potentially be bypassed by cleverly crafted payloads, complete countermeasures are difficult. While efforts have been made to reduce the risk of unintended command execution or role-playing attacks, this is merely a risk mitigation measure and should not be considered a guarantee. You should not use `lq` to handle untrusted data.
 
+In addition, model output shown in the terminal is sanitized to remove terminal control sequences and invisible formatting characters, reducing the impact of malicious or prompt-injected responses.
+
 ### Information Leakage
 
 Files passed via `-f`, images passed via `-i`, and data passed from standard input are all sent to the LLM as part of the prompt. Even if these data contain passwords, private keys, authentication tokens, or other confidential information, they will be sent without masking. Therefore, extreme caution is advised when using cloud LLM services. For such use cases, consider using a local LLM.

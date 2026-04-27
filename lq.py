@@ -894,6 +894,89 @@ def _mask_api_key(key: str) -> str:
         return "****"
     return f"{key[:6]}...{key[-4:]}"
 
+def _sanitize_terminal_text(text: str, state: Optional[Dict[str, Any]] = None) -> str:
+    """Remove terminal control sequences and invisible formatting chars.
+
+    The sanitizer is stateful so streaming output can drop escape sequences
+    that are split across SSE chunks.
+    """
+    if state is None:
+        state = {}
+
+    mode = state.get("mode", "normal")
+    output: List[str] = []
+
+    for ch in text:
+        code = ord(ch)
+
+        if mode == "normal":
+            if ch == "\x1b":
+                mode = "escape"
+                continue
+            if ch in ("\u2028", "\u2029"):
+                output.append("\n")
+                continue
+            if ch == "\u0085":
+                output.append("\n")
+                continue
+            if code < 0x20 or code == 0x7f:
+                if ch in ("\n", "\t"):
+                    output.append(ch)
+                elif ch == "\r":
+                    output.append("\n")
+                continue
+            if unicodedata.category(ch) in {"Cc", "Cf"}:
+                continue
+            output.append(ch)
+            continue
+
+        if mode == "escape":
+            if ch == "[":
+                mode = "csi"
+                continue
+            if ch == "]":
+                mode = "osc"
+                continue
+            if ch in ("P", "^", "_"):
+                mode = "string"
+                continue
+            mode = "normal"
+            continue
+
+        if mode == "csi":
+            if 0x40 <= code <= 0x7e:
+                mode = "normal"
+            continue
+
+        if mode == "osc":
+            if ch == "\x07":
+                mode = "normal"
+            elif ch == "\x1b":
+                mode = "osc_escape"
+            continue
+
+        if mode == "osc_escape":
+            if ch == "\\":
+                mode = "normal"
+            else:
+                mode = "osc"
+            continue
+
+        if mode == "string":
+            if ch == "\x1b":
+                mode = "string_escape"
+            continue
+
+        if mode == "string_escape":
+            if ch == "\\":
+                mode = "normal"
+            else:
+                mode = "string"
+            continue
+
+    state["mode"] = mode
+    return "".join(output)
+
 def call_api(cfg: Config, payload: bytes) -> Optional[str]:
     """Call an OpenAI-compatible Chat Completions API."""
     endpoint = cfg.api_url.rstrip('/') + "/chat/completions"
@@ -967,7 +1050,7 @@ def _try_api_call(endpoint: str, payload: bytes, auth_header: Optional[str], deb
                         error(f"API response contains no choices")
                     message = choices[0].get("message", {})
                     content = message.get("content", "")
-                    return content
+                    return _sanitize_terminal_text(content)
     except json.JSONDecodeError as e:
         error(f"Invalid JSON from API: {e}")
     except urllib.error.HTTPError as e:
@@ -987,6 +1070,8 @@ def _handle_streaming(resp, debug: bool, output_json: bool) -> str:
             if decoded:
                 raw_lines.append(decoded)
         return json.dumps(raw_lines, ensure_ascii=False)
+
+    sanitize_state: Dict[str, Any] = {}
     
     for line in resp:
         decoded = line.decode("utf-8", errors="ignore")
@@ -997,9 +1082,10 @@ def _handle_streaming(resp, debug: bool, output_json: bool) -> str:
         if is_done:
             break
         if content is not None:
-            sys.stdout.write(content)
+            safe_content = _sanitize_terminal_text(content, sanitize_state)
+            sys.stdout.write(safe_content)
             sys.stdout.flush()
-            chunks.append(content)
+            chunks.append(safe_content)
     
     return "".join(chunks)
 
@@ -1029,7 +1115,7 @@ def main():
         if cfg.files or cfg.images:
             cfg.files.clear()
             cfg.images.clear()
-        
+
         # Output response
         if response:
             if cfg.stream:
@@ -1038,10 +1124,8 @@ def main():
             else:
                 print(response)
             session.add_assistant_message(response)
-    
-    if not args.chat:
-        return
-    if chat_without_tty:
+
+    if not args.chat or chat_without_tty:
         return
 
     _install_readline_completion(cfg)

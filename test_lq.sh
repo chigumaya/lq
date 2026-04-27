@@ -2,13 +2,12 @@
 
 set -eu
 
-test_config="test_config_$$.json"
-test_image="test_image.$$.gif"
 mock_dir="test_mock_$$"
+test_config="$mock_dir/test_config.json"
+test_image="$mock_dir/test_image.gif"
 umask 066
 
 cleanup() {
-  rm -f "$test_config" "$test_image"
   rm -rf "$mock_dir"
 }
 
@@ -58,7 +57,6 @@ class MockResponse:
         raw = json.dumps(self._payload)
         yield f"data: {raw}\n".encode("utf-8")
         yield b"data: [DONE]\n"
-
 
 def urlopen(req, timeout=120):
     body = getattr(req, "data", b"") or b""
@@ -114,7 +112,6 @@ def urlopen(req, timeout=120):
         ],
     }
     return MockResponse(response)
-
 
 urllib.request.urlopen = urlopen
 PY

@@ -11,6 +11,7 @@ from lq import (
     _process_attachment_data,
     _parse_sse_line,
     _handle_streaming,
+    _sanitize_terminal_text,
     _handle_chat_command,
     _build_chat_user_content,
     _text_display_width,
@@ -150,6 +151,30 @@ class TestStreaming(unittest.TestCase):
         chunks.append(b'\ndata: [DONE]\n')
         result = _handle_streaming(self._make_mock_resp(chunks), False, False)
         self.assertEqual(result, "01234")
+
+    def test_streaming_sanitizes_ansi_across_chunk_boundaries(self):
+        payload1 = {"choices": [{"delta": {"content": "Hello \x1b["}}]}
+        payload2 = {"choices": [{"delta": {"content": "31mred\x1b[0m\rworld"}}]}
+        lines = [
+            f'data: {json.dumps(payload1)}\n'.encode(),
+            f'data: {json.dumps(payload2)}\n'.encode(),
+            b'data: [DONE]\n',
+        ]
+        from contextlib import redirect_stdout
+        from io import StringIO
+
+        buf = StringIO()
+        with redirect_stdout(buf):
+            result = _handle_streaming(self._make_mock_resp(lines), False, False)
+
+        self.assertEqual(result, "Hello red\nworld")
+        self.assertEqual(buf.getvalue(), "Hello red\nworld")
+
+
+class TestTerminalSanitization(unittest.TestCase):
+    def test_strips_control_and_formatting_chars(self):
+        text = "A\x1b[31mB\x1b[0m\rC\u202eD\u200bE\u009bF\u0085G"
+        self.assertEqual(_sanitize_terminal_text(text), "AB\nCDEF\nG")
 
 
 class TestResolveTemplate(unittest.TestCase):
